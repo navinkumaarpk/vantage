@@ -5,6 +5,8 @@ import io.vantage.agentcore.mcp.McpClientRegistry;
 import io.vantage.agentcore.router.ToolgroupRouter;
 import java.util.Map;
 import java.util.Optional;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -24,9 +26,21 @@ import org.springframework.web.bind.annotation.RestController;
  * to the LLM call, scoped to just that one toolgroup's schemas per the
  * context-control design from the architecture discussion -> LLM decides
  * whether to actually call the tool and synthesizes a response either way.
+ *
+ * <p><strong>Resilience added 2026-07-26:</strong> previously the whole
+ * flow — registry lookup, tool attachment, the actual LLM call — had zero
+ * error handling. Any failure (a toolgroup unregistered because it never
+ * connected, per agent-core's matching fix; or a registered toolgroup whose
+ * session died after the fact, the gap that fix explicitly doesn't cover)
+ * would bubble up as an unhandled exception and a generic 500. Now wrapped
+ * so a broken toolgroup degrades this one request gracefully — a clear
+ * message and {@code degraded: true} in the response — instead of an
+ * opaque failure.
  */
 @RestController
 public class ChatController {
+
+    private static final Logger log = LoggerFactory.getLogger(ChatController.class);
 
     private final ChatClient chatClient;
     private final ToolgroupRouter router;
@@ -43,19 +57,42 @@ public class ChatController {
     @PostMapping("/api/chat")
     public Map<String, Object> chat(@RequestBody ChatRequest request) {
         Optional<String> toolgroup = router.route(request.message(), registry.all().keySet());
+        Optional<McpSyncClient> client = toolgroup.flatMap(registry::get);
 
-        ChatClient.ChatClientRequestSpec promptSpec = chatClient.prompt().user(request.message());
-
-        if (toolgroup.isPresent()) {
-            McpSyncClient client = registry.get(toolgroup.get()).orElseThrow();
-            promptSpec = promptSpec.tools(new SyncMcpToolCallbackProvider(client));
+        if (toolgroup.isPresent() && client.isEmpty()) {
+            // Defense-in-depth: shouldn't happen today since the router only
+            // sees currently-registered toolgroups, but don't rely on that
+            // invariant holding forever (e.g. if a future deregister-on-
+            // failure mechanism gets added).
+            log.warn("Routed to toolgroup '{}' but it is not currently registered", toolgroup.get());
+            return degradedResponse(toolgroup.get(), "that capability is not currently connected");
         }
 
-        String answer = promptSpec.call().content();
+        try {
+            ChatClient.ChatClientRequestSpec promptSpec = chatClient.prompt().user(request.message());
+            if (client.isPresent()) {
+                promptSpec = promptSpec.tools(new SyncMcpToolCallbackProvider(client.get()));
+            }
+            String answer = promptSpec.call().content();
+            return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"));
+        } catch (Exception e) {
+            // Covers the real gap: a toolgroup that connected fine at
+            // startup but whose session has since died (server restarted,
+            // crashed, network dropped) — no reconnect logic exists yet, so
+            // this is what actually catches that case today.
+            log.error("Chat request failed (toolgroup={}): {}", toolgroup.orElse("none"), e.getMessage(), e);
+            return degradedResponse(toolgroup.orElse(null), "something went wrong processing that request");
+        }
+    }
 
+    private Map<String, Object> degradedResponse(String toolgroup, String reason) {
+        String toolgroupPart = (toolgroup != null) ? " ('" + toolgroup + "')" : "";
         return Map.of(
-                "answer", answer,
-                "toolgroupUsed", toolgroup.orElse("none")
+                "answer", "This request couldn't be completed" + toolgroupPart + " — " + reason
+                        + ". The issue has been logged; try again shortly.",
+                "toolgroupUsed", "none",
+                "degraded", true
         );
     }
 }
+

@@ -3,33 +3,41 @@ package io.vantage.agentcore.mcp;
 import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Builds one {@link McpSyncClient} per entry in {@link VantageMcpProperties}
  * and registers it into {@link McpClientRegistry}. Runs once at startup (see
- * {@link VantageMcpAutoConfiguration}) — this is intentionally not lazy,
- * since a toolgroup that fails to connect should surface as a startup
- * failure, not a confusing runtime error the first time a request tries to
- * route to it.
+ * {@link VantageMcpAutoConfiguration}).
  *
- * <p><strong>Bug found and fixed (2026-07-26):</strong> previously used
- * {@code HttpClientSseClientTransport} (the legacy SSE-specific transport).
- * This worked by accident early on because log-mcp-server had no explicit
- * {@code spring.ai.mcp.server.protocol} set and was defaulting to the
- * deprecated SSE protocol, which happened to match. Once the server was
- * correctly configured with {@code protocol: STREAMABLE} (per Spring AI's
- * official docs), this client transport became the mismatched one — it kept
- * timing out on {@code initialize()} since it was sending SSE-style requests
- * against a server that no longer speaks that protocol. Fixed by switching
- * to {@link HttpClientStreamableHttpTransport}, confirmed via Spring's own
- * MCP Security reference docs and the MCP Java SDK client docs, both of
- * which show the same builder shape independently. The configured URL
- * ({@code vantage.mcp.toolgroups.*.url}) already includes the {@code /mcp}
- * path segment, so the builder is called with just the URL — not paired
- * with an explicit {@code .endpoint("/mcp")} call, which would double the
- * path.
+ * <p><strong>Design reversed 2026-07-26:</strong> this class previously
+ * failed the whole application startup if any single toolgroup couldn't
+ * connect — the javadoc here used to argue that was the right call, so a
+ * broken toolgroup would "surface as a startup failure, not a confusing
+ * runtime error." In practice this meant one flaky/misconfigured MCP server
+ * (a hostname typo, a dependency not up yet) took down every toolgroup,
+ * including ones that were perfectly healthy — confirmed directly when a
+ * transient jira-rag-mcp-server startup race killed the entire service,
+ * including the already-working logs/code toolgroups. Each toolgroup's
+ * connection attempt is now isolated: failures are logged clearly (name,
+ * URL, cause) and skipped rather than propagated, so the app starts with
+ * whatever toolgroups actually connected. {@link McpClientRegistry#all()}
+ * reflects only genuinely live toolgroups — callers must not assume every
+ * configured toolgroup is actually registered (see ChatController's
+ * matching fix for the request-time half of this).
+ *
+ * <p><strong>Known remaining gap, not fixed here:</strong> this only
+ * handles connection failures at startup. If a toolgroup connects
+ * successfully but its session later dies (the MCP server restarts,
+ * crashes, or the network drops), there's no reconnection logic — that
+ * client will keep failing on every subsequent call until the whole service
+ * is restarted. Worth a follow-up (periodic health check + reconnect, or
+ * lazy reconnect on failure) if this proves to matter in practice.
  */
 public class McpClientRegistrar {
+
+    private static final Logger log = LoggerFactory.getLogger(McpClientRegistrar.class);
 
     private final VantageMcpProperties properties;
     private final McpClientRegistry registry;
@@ -41,10 +49,17 @@ public class McpClientRegistrar {
 
     public void registerAll() {
         properties.getToolgroups().forEach((toolgroupName, connection) -> {
-            var transport = HttpClientStreamableHttpTransport.builder(connection.getUrl()).build();
-            McpSyncClient client = McpClient.sync(transport).build();
-            client.initialize();
-            registry.register(toolgroupName, client);
+            try {
+                var transport = HttpClientStreamableHttpTransport.builder(connection.getUrl()).build();
+                McpSyncClient client = McpClient.sync(transport).build();
+                client.initialize();
+                registry.register(toolgroupName, client);
+                log.info("Connected MCP toolgroup '{}' at {}", toolgroupName, connection.getUrl());
+            } catch (Exception e) {
+                log.error("Failed to connect MCP toolgroup '{}' at {} — this toolgroup will be unavailable "
+                        + "until the app is restarted (no auto-reconnect yet). Cause: {}",
+                        toolgroupName, connection.getUrl(), e.getMessage());
+            }
         });
     }
 }

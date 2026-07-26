@@ -17,4 +17,4 @@ server:
 
 vantage:
   embedding:
-    url: http://server1:8082/v1/embeddings
+    url: http://192.168.1.107:8082/v1/embeddings
