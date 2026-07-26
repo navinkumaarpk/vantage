@@ -4,21 +4,21 @@ import co.elastic.clients.elasticsearch.ElasticsearchClient;
 import co.elastic.clients.elasticsearch.core.SearchResponse;
 import co.elastic.clients.elasticsearch.core.search.Hit;
 import java.util.List;
-import org.springframework.ai.tool.annotation.Tool;
+import org.springframework.ai.tool.annotation.McpTool;
 import org.springframework.stereotype.Component;
 
 /**
- * <strong>Not verified against real dependencies</strong> — the {@code @Tool}
- * annotation and how it gets auto-discovered as an MCP server tool is the
- * least-confident part of this module (same class of guess as agent-core's
- * original McpSyncClient wiring, which did turn out to need correcting once,
- * then compiled clean after the fix). The Elasticsearch query logic itself
- * follows the client's documented lambda DSL and should be solid regardless
- * of whether the tool-registration mechanism needs adjusting.
- *
- * <p>Hardcoded to the {@code oltmgr-logs-sample} test index for now — swap
- * for a real index pattern (and drop the "sample" naming) once the actual
- * log ingestion pipeline exists.
+ * <strong>Bug found and fixed (2026-07-26):</strong> this method previously
+ * used {@code @Tool}, which is for exposing a method directly to an
+ * in-process ChatClient — not for external MCP server exposure. Confirmed via
+ * a live debug endpoint that log-mcp-server's auto-configuration scans for
+ * {@code @McpTool} specifically (per VISTA's prior design, which used
+ * {@code @McpTool} for external MCP exposure and {@code @Tool} only when
+ * also calling a method directly from an in-process ChatClient with no
+ * network hop). {@code @McpTool}'s exact package
+ * ({@code org.springframework.ai.tool.annotation.McpTool}) is a
+ * best-effort guess, parallel to where {@code @Tool} lives — not yet
+ * confirmed to compile.
  */
 @Component
 public class LogSearchTools {
@@ -31,7 +31,7 @@ public class LogSearchTools {
         this.esClient = esClient;
     }
 
-    @Tool(description = "Full-text and filtered search over OltMgr log lines. "
+    @McpTool(description = "Full-text and filtered search over OltMgr log lines. "
             + "query: free-text match against the log message (optional). "
             + "roltMac: exact R-OLT MAC address to filter by (optional). "
             + "Returns matching log entries, newest first, up to 50 results.")

@@ -1,20 +1,22 @@
 spring:
   application:
     name: log-analyzer-service
+  ai:
+    openai:
+      api-key: not-needed
+      base-url: http://192.168.1.107:8080
+      chat:
+        options:
+          model: /opt/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
+          max-tokens: 512
 
 server:
   port: 8081
 
-# No toolgroups configured yet — the property is deliberately omitted
-# entirely rather than set to {}. VantageMcpProperties.toolgroups already
-# defaults to an empty LinkedHashMap in Java, and Spring's YAML binding
-# chokes on an explicit "{}" here (it gets flattened to the literal string
-# "" during config-data processing, which then fails to convert to a Map —
-# confirmed via a real startup failure). Add entries here once real MCP
-# tool servers exist to point at, e.g.:
-#
 vantage:
   mcp:
     toolgroups:
       logs:
-        url: http://192.168.1.108:8091/mcp
+        url: http://192.168.1.108:8091/mcp    # was :8081 (log-analyzer-service's own
+                                          # port) — real bug found earlier, fixed
+                                          # locally but never actually pushed

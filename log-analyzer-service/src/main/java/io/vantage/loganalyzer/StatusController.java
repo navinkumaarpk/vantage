@@ -1,6 +1,8 @@
 package io.vantage.loganalyzer;
 
+import io.modelcontextprotocol.client.McpSyncClient;
 import io.vantage.agentcore.mcp.McpClientRegistry;
+import java.util.List;
 import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -27,4 +29,26 @@ public class StatusController {
                 "registeredToolgroups", mcpClientRegistry.all().keySet()
         );
     }
+
+    /**
+     * Debugging the "no tool call ever reached log-mcp-server" issue —
+     * calls listTools() directly on the "logs" toolgroup's MCP client,
+     * bypassing ChatClient/the LLM entirely. If this comes back empty, the
+     * problem is server-side (LogSearchTools never got registered as a real
+     * MCP tool by log-mcp-server's auto-configuration). If it comes back
+     * with search_logs listed, the problem is client-side (something in how
+     * ChatController attaches tools to the ChatClient call).
+     */
+    @GetMapping("/api/debug/logs-tools")
+    public Map<String, Object> debugLogsTools() {
+        McpSyncClient client = mcpClientRegistry.get("logs")
+                .orElseThrow(() -> new IllegalStateException("logs toolgroup not registered"));
+
+        List<String> toolNames = client.listTools().tools().stream()
+                .map(tool -> tool.name())
+                .toList();
+
+        return Map.of("toolsSeenByClient", toolNames);
+    }
 }
+
