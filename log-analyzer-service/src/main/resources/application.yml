@@ -22,3 +22,5 @@ vantage:
                                           # locally but never actually pushed
       code:
         url: http://192.168.1.108:8092/mcp
+      jira_rag:
+        url: http://192.168.1.108:8093/mcp
