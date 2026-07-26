@@ -3,3 +3,6 @@
 target/
 build/
 out/
+log-analyzer-service/target/
+agent-core/target/
+log-mcp-server/target/
