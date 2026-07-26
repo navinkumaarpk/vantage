@@ -1,0 +1,285 @@
+diff --git a/log-mcp-server/pom.xml b/log-mcp-server/pom.xml
+new file mode 100644
+index 0000000..e77e2de
+--- /dev/null
++++ b/log-mcp-server/pom.xml
+@@ -0,0 +1,46 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<project xmlns="http://maven.apache.org/POM/4.0.0"
++         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
++         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
++    <modelVersion>4.0.0</modelVersion>
++    <parent>
++        <groupId>io.vantage</groupId>
++        <artifactId>vantage-platform</artifactId>
++        <version>0.1.0-SNAPSHOT</version>
++    </parent>
++
++    <artifactId>log-mcp-server</artifactId>
++    <packaging>jar</packaging>
++
++    <!--
++        Runs on Server2, colocated with Elasticsearch — per the architecture
++        decision that MCP tool servers should sit next to the data they
++        query, not next to the orchestrator. log-analyzer-service (Server3)
++        calls this over the network; this calls ES over localhost.
++    -->
++
++    <dependencies>
++        <dependency>
++            <groupId>org.springframework.ai</groupId>
++            <artifactId>spring-ai-starter-mcp-server-webmvc</artifactId>
++        </dependency>
++        <dependency>
++            <groupId>co.elastic.clients</groupId>
++            <artifactId>elasticsearch-java</artifactId>
++            <version>9.4.4</version>
++        </dependency>
++        <dependency>
++            <groupId>com.fasterxml.jackson.core</groupId>
++            <artifactId>jackson-databind</artifactId>
++        </dependency>
++    </dependencies>
++
++    <build>
++        <plugins>
++            <plugin>
++                <groupId>org.springframework.boot</groupId>
++                <artifactId>spring-boot-maven-plugin</artifactId>
++            </plugin>
++        </plugins>
++    </build>
++</project>
+diff --git a/log-mcp-server/src/main/java/io/vantage/logmcp/ElasticsearchConfig.java b/log-mcp-server/src/main/java/io/vantage/logmcp/ElasticsearchConfig.java
+new file mode 100644
+index 0000000..39d5def
+--- /dev/null
++++ b/log-mcp-server/src/main/java/io/vantage/logmcp/ElasticsearchConfig.java
+@@ -0,0 +1,65 @@
++package io.vantage.logmcp;
++
++import co.elastic.clients.elasticsearch.ElasticsearchClient;
++import co.elastic.clients.json.jackson.JacksonJsonpMapper;
++import co.elastic.clients.transport.ElasticsearchTransport;
++import co.elastic.clients.transport.rest_client.RestClientTransport;
++import javax.net.ssl.SSLContext;
++import org.apache.http.HttpHost;
++import org.apache.http.auth.AuthScope;
++import org.apache.http.auth.UsernamePasswordCredentials;
++import org.apache.http.client.CredentialsProvider;
++import org.apache.http.impl.client.BasicCredentialsProvider;
++import org.apache.http.ssl.SSLContextBuilder;
++import org.elasticsearch.client.RestClient;
++import org.springframework.beans.factory.annotation.Value;
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++
++/**
++ * <strong>Not verified against real dependencies</strong> — same caveat as
++ * agent-core's original MCP client wiring: written to the well-established
++ * Elastic Java API client + Apache HttpClient 4.x pattern, but not compiled
++ * against the actual jars in this sandbox. Higher confidence than the
++ * MCP-server-specific wiring in {@link LogSearchTools} though, since this
++ * API shape has been stable for years.
++ *
++ * <p>TLS verification is disabled (trust-all) to match the self-signed certs
++ * from Elasticsearch's default single-node security auto-configuration.
++ * Fine for this internal, colocated setup — swap for real CA verification
++ * before this is ever exposed beyond Server2 itself.
++ */
++@Configuration
++public class ElasticsearchConfig {
++
++    @Value("${vantage.elasticsearch.host}")
++    private String host;
++
++    @Value("${vantage.elasticsearch.port}")
++    private int port;
++
++    @Value("${vantage.elasticsearch.username}")
++    private String username;
++
++    @Value("${vantage.elasticsearch.password}")
++    private String password;
++
++    @Bean
++    public ElasticsearchClient elasticsearchClient() throws Exception {
++        CredentialsProvider credentialsProvider = new BasicCredentialsProvider();
++        credentialsProvider.setCredentials(AuthScope.ANY, new UsernamePasswordCredentials(username, password));
++
++        SSLContext sslContext = SSLContextBuilder.create()
++                .loadTrustMaterial(null, (chain, authType) -> true)
++                .build();
++
++        RestClient restClient = RestClient.builder(new HttpHost(host, port, "https"))
++                .setHttpClientConfigCallback(hc -> hc
++                        .setSSLContext(sslContext)
++                        .setDefaultCredentialsProvider(credentialsProvider))
++                .build();
++
++        ElasticsearchTransport transport = new RestClientTransport(restClient, new JacksonJsonpMapper());
++        return new ElasticsearchClient(transport);
++    }
++}
+diff --git a/log-mcp-server/src/main/java/io/vantage/logmcp/LogDocument.java b/log-mcp-server/src/main/java/io/vantage/logmcp/LogDocument.java
+new file mode 100644
+index 0000000..1f09c89
+--- /dev/null
++++ b/log-mcp-server/src/main/java/io/vantage/logmcp/LogDocument.java
+@@ -0,0 +1,19 @@
++package io.vantage.logmcp;
++
++import com.fasterxml.jackson.annotation.JsonProperty;
++
++/** Matches the oltmgr-logs-sample index mapping field-for-field. */
++public class LogDocument {
++
++    public String timestamp;
++
++    @JsonProperty("rolt_mac")
++    public String roltMac;
++
++    @JsonProperty("class")
++    public String className;
++
++    public int line;
++    public String event;
++    public String message;
++}
+diff --git a/log-mcp-server/src/main/java/io/vantage/logmcp/LogEntry.java b/log-mcp-server/src/main/java/io/vantage/logmcp/LogEntry.java
+new file mode 100644
+index 0000000..c514085
+--- /dev/null
++++ b/log-mcp-server/src/main/java/io/vantage/logmcp/LogEntry.java
+@@ -0,0 +1,12 @@
++package io.vantage.logmcp;
++
++/** One matched log line, returned from search_logs. */
++public record LogEntry(
++        String timestamp,
++        String roltMac,
++        String className,
++        int line,
++        String event,
++        String message
++) {
++}
+diff --git a/log-mcp-server/src/main/java/io/vantage/logmcp/LogMcpServerApplication.java b/log-mcp-server/src/main/java/io/vantage/logmcp/LogMcpServerApplication.java
+new file mode 100644
+index 0000000..dbc3910
+--- /dev/null
++++ b/log-mcp-server/src/main/java/io/vantage/logmcp/LogMcpServerApplication.java
+@@ -0,0 +1,11 @@
++package io.vantage.logmcp;
++
++import org.springframework.boot.SpringApplication;
++import org.springframework.boot.autoconfigure.SpringBootApplication;
++
++@SpringBootApplication
++public class LogMcpServerApplication {
++    public static void main(String[] args) {
++        SpringApplication.run(LogMcpServerApplication.class, args);
++    }
++}
+diff --git a/log-mcp-server/src/main/java/io/vantage/logmcp/LogSearchTools.java b/log-mcp-server/src/main/java/io/vantage/logmcp/LogSearchTools.java
+new file mode 100644
+index 0000000..88fd8d8
+--- /dev/null
++++ b/log-mcp-server/src/main/java/io/vantage/logmcp/LogSearchTools.java
+@@ -0,0 +1,65 @@
++package io.vantage.logmcp;
++
++import co.elastic.clients.elasticsearch.ElasticsearchClient;
++import co.elastic.clients.elasticsearch.core.SearchResponse;
++import co.elastic.clients.elasticsearch.core.search.Hit;
++import java.util.List;
++import org.springframework.ai.tool.annotation.Tool;
++import org.springframework.stereotype.Component;
++
++/**
++ * <strong>Not verified against real dependencies</strong> — the {@code @Tool}
++ * annotation and how it gets auto-discovered as an MCP server tool is the
++ * least-confident part of this module (same class of guess as agent-core's
++ * original McpSyncClient wiring, which did turn out to need correcting once,
++ * then compiled clean after the fix). The Elasticsearch query logic itself
++ * follows the client's documented lambda DSL and should be solid regardless
++ * of whether the tool-registration mechanism needs adjusting.
++ *
++ * <p>Hardcoded to the {@code oltmgr-logs-sample} test index for now — swap
++ * for a real index pattern (and drop the "sample" naming) once the actual
++ * log ingestion pipeline exists.
++ */
++@Component
++public class LogSearchTools {
++
++    private static final String INDEX = "oltmgr-logs-sample";
++
++    private final ElasticsearchClient esClient;
++
++    public LogSearchTools(ElasticsearchClient esClient) {
++        this.esClient = esClient;
++    }
++
++    @Tool(description = "Full-text and filtered search over OltMgr log lines. "
++            + "query: free-text match against the log message (optional). "
++            + "roltMac: exact R-OLT MAC address to filter by (optional). "
++            + "Returns matching log entries, newest first, up to 50 results.")
++    public List<LogEntry> searchLogs(String query, String roltMac) {
++        try {
++            SearchResponse<LogDocument> response = esClient.search(s -> s
++                    .index(INDEX)
++                    .size(50)
++                    .sort(sort -> sort.field(f -> f.field("timestamp").order(co.elastic.clients.elasticsearch._types.SortOrder.Desc)))
++                    .query(q -> q.bool(b -> {
++                        if (query != null && !query.isBlank()) {
++                            b.must(m -> m.match(mt -> mt.field("message").query(query)));
++                        }
++                        if (roltMac != null && !roltMac.isBlank()) {
++                            b.filter(f -> f.term(t -> t.field("rolt_mac").value(roltMac)));
++                        }
++                        return b;
++                    })),
++                    LogDocument.class
++            );
++
++            return response.hits().hits().stream()
++                    .map(Hit::source)
++                    .filter(java.util.Objects::nonNull)
++                    .map(doc -> new LogEntry(doc.timestamp, doc.roltMac, doc.className, doc.line, doc.event, doc.message))
++                    .toList();
++        } catch (Exception e) {
++            throw new RuntimeException("search_logs failed: " + e.getMessage(), e);
++        }
++    }
++}
+diff --git a/log-mcp-server/src/main/resources/application.yml b/log-mcp-server/src/main/resources/application.yml
+new file mode 100644
+index 0000000..0d6f4f1
+--- /dev/null
++++ b/log-mcp-server/src/main/resources/application.yml
+@@ -0,0 +1,13 @@
++spring:
++  application:
++    name: log-mcp-server
++
++server:
++  port: 8091
++
++vantage:
++  elasticsearch:
++    host: localhost
++    port: 9200
++    username: elastic
++    password: ${ES_PASSWORD}    # set as an env var, not committed to the repo
+diff --git a/pom.xml b/pom.xml
+index c4d4731..4ea709d 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -40,6 +40,7 @@
+         <module>agent-core</module>
+         <module>log-analyzer-service</module>
+         <module>testcase-generator-service</module>
++        <module>log-mcp-server</module>
+     </modules>
+ 
+     <properties>
