@@ -1,10 +1,8 @@
 package io.vantage.loganalyzer;
 
-import io.modelcontextprotocol.client.McpSyncClient;
-import io.vantage.agentcore.mcp.McpClientRegistry;
-import io.vantage.agentcore.router.ToolgroupRouter;
 import java.util.Map;
 import java.util.Optional;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
@@ -12,6 +10,10 @@ import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+
+import io.modelcontextprotocol.client.McpSyncClient;
+import io.vantage.agentcore.mcp.McpClientRegistry;
+import io.vantage.agentcore.router.ToolgroupRouter;
 
 /**
  * <strong>Not verified against real dependencies</strong> — same caveat
@@ -54,6 +56,20 @@ public class ChatController {
 
     public record ChatRequest(String message) {}
 
+    private static final String SYSTEM_PROMPT = """
+            You have access to specialized tools for this request when a relevant toolgroup is attached.
+            When a tool is available, call it directly using your best interpretation of the user's message
+            as input — extract the relevant search terms, symbol names, or anomaly description yourself
+            rather than asking the user to restate or clarify before you try.
+
+            If a tool call fails or errors out (a connection problem, a timeout, a system error — anything
+            that isn't simply "no results found"), tell the user plainly that the underlying capability is
+            currently unavailable and the request could not be completed right now. Do not respond by asking
+            the user for more detail or rephrasing the question — more detail from them cannot fix a broken
+            connection, and implying otherwise is misleading. Only ask a genuine clarifying question when the
+            request itself is ambiguous about which tool or data to use, before any tool call is attempted.
+            """;
+
     @PostMapping("/api/chat")
     public Map<String, Object> chat(@RequestBody ChatRequest request) {
         Optional<String> toolgroup = router.route(request.message(), registry.all().keySet());
@@ -69,7 +85,9 @@ public class ChatController {
         }
 
         try {
-            ChatClient.ChatClientRequestSpec promptSpec = chatClient.prompt().user(request.message());
+            ChatClient.ChatClientRequestSpec promptSpec = chatClient.prompt()
+                    .system(SYSTEM_PROMPT)
+                    .user(request.message());
             if (client.isPresent()) {
                 promptSpec = promptSpec.tools(new SyncMcpToolCallbackProvider(client.get()));
             }
