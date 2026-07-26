@@ -1,5 +1,6 @@
 package io.vantage.codemcp;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.net.URI;
 import java.net.URLEncoder;
@@ -43,7 +44,15 @@ import org.springframework.web.client.RestTemplate;
 public class CodeSearchTools {
 
     private final RestTemplate restTemplate = new RestTemplate();
-    private final ObjectMapper objectMapper = new ObjectMapper();
+    private final ObjectMapper objectMapper = new ObjectMapper()
+            .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+    // ^ Bug found and fixed (2026-07-26): OpenGrokSearchResponse only
+    // declares resultCount/results, but the real response also includes
+    // time/startDocument/endDocument. Jackson's default strict mode threw
+    // UnrecognizedPropertyException on "time" specifically, which the LLM
+    // then surfaced almost verbatim in its answer — that's what led to
+    // finding this. Ignoring unknown properties is simpler and more
+    // resilient than exhaustively declaring every field OpenGrok might add.
 
     @Value("${vantage.opengrok.search-url}")
     private String searchUrl;
