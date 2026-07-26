@@ -1,6 +1,11 @@
 spring:
   application:
     name: log-mcp-server
+  ai:
+    mcp:
+      server:
+        annotation-scanner:
+          enabled: true
 
 server:
   port: 8091
