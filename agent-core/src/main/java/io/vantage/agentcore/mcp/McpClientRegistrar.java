@@ -2,7 +2,7 @@ package io.vantage.agentcore.mcp;
 
 import io.modelcontextprotocol.client.McpClient;
 import io.modelcontextprotocol.client.McpSyncClient;
-import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
+import io.modelcontextprotocol.client.transport.HttpClientStreamableHttpTransport;
 
 /**
  * Builds one {@link McpSyncClient} per entry in {@link VantageMcpProperties}
@@ -12,13 +12,22 @@ import io.modelcontextprotocol.client.transport.HttpClientSseClientTransport;
  * failure, not a confusing runtime error the first time a request tries to
  * route to it.
  *
- * <p><strong>Unverified against the real dependency:</strong> the transport
- * class name/builder shape here ({@code HttpClientSseClientTransport}) is
- * best-effort based on the MCP Java SDK's typical API shape — this sandbox
- * can't reach Maven Central to confirm it compiles against the actual
- * spring-ai-starter-mcp-client version. Expect to adjust this one class if
- * the real SDK's transport builder differs; nothing else in agent-core
- * depends on these specifics.
+ * <p><strong>Bug found and fixed (2026-07-26):</strong> previously used
+ * {@code HttpClientSseClientTransport} (the legacy SSE-specific transport).
+ * This worked by accident early on because log-mcp-server had no explicit
+ * {@code spring.ai.mcp.server.protocol} set and was defaulting to the
+ * deprecated SSE protocol, which happened to match. Once the server was
+ * correctly configured with {@code protocol: STREAMABLE} (per Spring AI's
+ * official docs), this client transport became the mismatched one — it kept
+ * timing out on {@code initialize()} since it was sending SSE-style requests
+ * against a server that no longer speaks that protocol. Fixed by switching
+ * to {@link HttpClientStreamableHttpTransport}, confirmed via Spring's own
+ * MCP Security reference docs and the MCP Java SDK client docs, both of
+ * which show the same builder shape independently. The configured URL
+ * ({@code vantage.mcp.toolgroups.*.url}) already includes the {@code /mcp}
+ * path segment, so the builder is called with just the URL — not paired
+ * with an explicit {@code .endpoint("/mcp")} call, which would double the
+ * path.
  */
 public class McpClientRegistrar {
 
@@ -32,7 +41,7 @@ public class McpClientRegistrar {
 
     public void registerAll() {
         properties.getToolgroups().forEach((toolgroupName, connection) -> {
-            var transport = HttpClientSseClientTransport.builder(connection.getUrl()).build();
+            var transport = HttpClientStreamableHttpTransport.builder(connection.getUrl()).build();
             McpSyncClient client = McpClient.sync(transport).build();
             client.initialize();
             registry.register(toolgroupName, client);
