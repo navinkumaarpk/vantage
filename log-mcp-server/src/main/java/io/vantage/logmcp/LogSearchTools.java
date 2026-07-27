@@ -25,7 +25,10 @@ import org.springframework.stereotype.Component;
 @Component
 public class LogSearchTools {
 
-    private static final String INDEX = "oltmgr-logs-sample";
+    // Wildcard so both the original hand-seeded oltmgr-logs-sample and any
+    // real uploaded logs (oltmgr-logs-uploaded) are searchable through the
+    // same tool — uploaded data would otherwise sit in ES unused by chat.
+    private static final String INDEX = "oltmgr-logs*";
 
     private final ElasticsearchClient esClient;
 

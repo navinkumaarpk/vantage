@@ -24,6 +24,54 @@
   .brand-tag { font-family: var(--sans); font-size: 12px; color: var(--faint); text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
   .spacer { flex: 1; }
   .toolgroups { display: flex; gap: 14px; align-items: center; }
+  .upload-btn {
+    font-family: var(--sans); font-size: 12.5px; color: var(--text); background: var(--raised);
+    border: 1px solid var(--line); border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  }
+  .upload-btn:hover { border-color: var(--brass-dim); }
+  .upload-btn:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+
+  .modal-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); z-index: 50;
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    width: 420px; max-width: 92vw; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden;
+  }
+  .modal-head {
+    display: flex; align-items: center; justify-content: space-between; padding: 14px 18px;
+    border-bottom: 1px solid var(--line);
+  }
+  .modal-title { font-family: var(--mono); font-size: 13px; font-weight: 600; letter-spacing: 0.04em; }
+  .modal-close { background: none; border: none; color: var(--faint); font-size: 20px; cursor: pointer; line-height: 1; padding: 2px 6px; }
+  .modal-close:hover { color: var(--text); }
+  .modal-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .modal-foot { padding: 14px 18px; border-top: 1px solid var(--line); display: flex; justify-content: flex-end; }
+  .modal-foot .new-btn { margin: 0; }
+
+  .drop-zone {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+    border: 1px dashed var(--line); border-radius: 8px; padding: 28px 16px; cursor: pointer;
+    text-align: center; font-size: 13px; color: var(--dim); transition: border-color 0.15s, background 0.15s;
+  }
+  .drop-zone:hover, .drop-zone.dragover { border-color: var(--brass-dim); background: var(--raised); }
+  .drop-zone-file { font-family: var(--mono); font-size: 12px; color: var(--brass); }
+
+  .field-row { display: flex; flex-direction: column; gap: 5px; }
+  .field-label { font-family: var(--mono); font-size: 11px; color: var(--faint); letter-spacing: 0.02em; }
+  .field-label .optional { color: var(--faint); font-weight: 400; }
+  .text-input {
+    background: var(--raised); border: 1px solid var(--line); border-radius: 7px; padding: 8px 11px;
+    color: var(--text); font-family: var(--sans); font-size: 13.5px; outline: none;
+  }
+  .text-input:focus { border-color: var(--brass-dim); }
+
+  .upload-result { font-size: 12.5px; line-height: 1.5; }
+  .upload-result.ok { color: var(--ok); }
+  .upload-result.err { color: var(--alert); }
+
   .model-select {
     font-family: var(--mono); font-size: 11px; color: var(--text); background: var(--raised);
     border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; cursor: pointer; outline: none;
@@ -153,10 +201,40 @@
       <div class="brand-tag">AI assistant for application diagnostics</div>
     </div>
     <div class="spacer"></div>
+    <button class="upload-btn" id="uploadBtn" title="Upload logs">⇧ Upload logs</button>
     <select class="model-select" id="modelSelect" aria-label="Model"></select>
     <div class="toolgroups" id="toolgroups" aria-live="polite"></div>
     <button class="menu-btn" id="activityToggle" aria-label="Toggle activity feed">⋮</button>
   </header>
+
+  <div class="modal-overlay" id="uploadOverlay">
+    <div class="modal">
+      <div class="modal-head">
+        <div class="modal-title">Upload logs</div>
+        <button class="modal-close" id="uploadClose" aria-label="Close">×</button>
+      </div>
+      <div class="modal-body">
+        <label class="drop-zone" id="dropZone" for="fileInput">
+          <div id="dropZoneText">Drop a log file here, or click to browse</div>
+          <div class="drop-zone-file" id="dropZoneFile"></div>
+        </label>
+        <input type="file" id="fileInput" hidden>
+        <div class="field-row">
+          <label class="field-label">Case name <span class="optional">(optional)</span></label>
+          <input type="text" id="caseNameInput" class="text-input" placeholder="e.g. r-olt-84bb-reconnect-storm">
+        </div>
+        <div class="field-row">
+          <label class="field-label">Jira ticket <span class="optional">(optional)</span></label>
+          <input type="text" id="jiraTicketInput" class="text-input" placeholder="e.g. JIRA-4821">
+        </div>
+        <div class="upload-result" id="uploadResult"></div>
+      </div>
+      <div class="modal-foot">
+        <button class="new-btn" id="uploadSubmit">Upload &amp; index</button>
+      </div>
+    </div>
+  </div>
+
   <div class="shell">
     <div class="sidebar" id="sidebar">
       <div class="sidebar-head">Investigations</div>
@@ -213,10 +291,20 @@
       modelSelect = document.getElementById("modelSelect"),
       invList = document.getElementById("invList"), activityFeed = document.getElementById("activityFeed"), livePulse = document.getElementById("livePulse"),
       sidebar = document.getElementById("sidebar"), activityCol = document.getElementById("activityCol"),
-      busy = false, currentInvestigationId = null, eventSource = null;
+      uploadBtn = document.getElementById("uploadBtn"), uploadOverlay = document.getElementById("uploadOverlay"),
+      uploadClose = document.getElementById("uploadClose"), dropZone = document.getElementById("dropZone"),
+      dropZoneText = document.getElementById("dropZoneText"), dropZoneFile = document.getElementById("dropZoneFile"),
+      fileInput = document.getElementById("fileInput"), caseNameInput = document.getElementById("caseNameInput"),
+      jiraTicketInput = document.getElementById("jiraTicketInput"), uploadResult = document.getElementById("uploadResult"),
+      uploadSubmit = document.getElementById("uploadSubmit"),
+      busy = false, currentInvestigationId = null, eventSource = null, selectedFile = null;
   var EXPECTED = ["logs", "code", "jira_rag"];
   var LABEL = { logs: "logs", code: "code", jira_rag: "jira" };
   var MODEL_LABELS = {};
+  // log-mcp-server lives on Server2, a different origin than this page
+  // (Server3) -- the upload endpoint has CORS configured specifically for
+  // this page's origin to allow the direct cross-origin call.
+  var UPLOAD_URL = "http://192.168.1.108:8091/api/logs/upload";
 
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
   function scrollDown() { main.scrollTop = main.scrollHeight; }
@@ -408,6 +496,69 @@
   input.addEventListener("input", function () { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 150) + "px"; });
   document.getElementById("examples").addEventListener("click", function (e) { var btn = e.target.closest(".example"); if (!btn) return; input.value = btn.getAttribute("data-q"); send(); });
   document.getElementById("newInvestigation").addEventListener("click", function () { startNewInvestigation(); closeMobilePanels(); });
+
+  /* ---------- log upload modal ---------- */
+
+  function openUploadModal() {
+    uploadOverlay.classList.add("open");
+    selectedFile = null; dropZoneFile.textContent = ""; dropZoneText.textContent = "Drop a log file here, or click to browse";
+    caseNameInput.value = ""; jiraTicketInput.value = "";
+    uploadResult.textContent = ""; uploadResult.className = "upload-result";
+  }
+  function closeUploadModal() { uploadOverlay.classList.remove("open"); }
+
+  uploadBtn.addEventListener("click", openUploadModal);
+  uploadClose.addEventListener("click", closeUploadModal);
+  uploadOverlay.addEventListener("click", function (e) { if (e.target === uploadOverlay) closeUploadModal(); });
+
+  function pickFile(file) {
+    selectedFile = file;
+    dropZoneText.textContent = "Selected:";
+    dropZoneFile.textContent = file.name + " (" + Math.round(file.size / 1024) + " KB)";
+  }
+
+  dropZone.addEventListener("click", function () { fileInput.click(); });
+  fileInput.addEventListener("change", function () { if (fileInput.files[0]) pickFile(fileInput.files[0]); });
+  dropZone.addEventListener("dragover", function (e) { e.preventDefault(); dropZone.classList.add("dragover"); });
+  dropZone.addEventListener("dragleave", function () { dropZone.classList.remove("dragover"); });
+  dropZone.addEventListener("drop", function (e) {
+    e.preventDefault(); dropZone.classList.remove("dragover");
+    if (e.dataTransfer.files[0]) pickFile(e.dataTransfer.files[0]);
+  });
+
+  uploadSubmit.addEventListener("click", function () {
+    if (!selectedFile) {
+      uploadResult.textContent = "Choose a file first.";
+      uploadResult.className = "upload-result err";
+      return;
+    }
+    uploadResult.textContent = "Uploading and indexing…";
+    uploadResult.className = "upload-result";
+    uploadSubmit.disabled = true;
+
+    var formData = new FormData();
+    formData.append("file", selectedFile);
+    if (caseNameInput.value.trim()) formData.append("caseName", caseNameInput.value.trim());
+    if (jiraTicketInput.value.trim()) formData.append("jiraTicket", jiraTicketInput.value.trim());
+
+    fetch(UPLOAD_URL, { method: "POST", body: formData })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.success) {
+          uploadResult.textContent = "Indexed " + d.entriesIndexed + " log entries from " + d.fileName + ".";
+          uploadResult.className = "upload-result ok";
+        } else {
+          uploadResult.textContent = (d.error || "Upload failed.") +
+            (d.entriesIndexed ? " (" + d.entriesIndexed + " entries did index successfully.)" : "");
+          uploadResult.className = "upload-result err";
+        }
+      })
+      .catch(function (err) {
+        uploadResult.textContent = "Couldn't reach the upload service: " + err.message;
+        uploadResult.className = "upload-result err";
+      })
+      .finally(function () { uploadSubmit.disabled = false; });
+  });
   pollStatus(); setInterval(pollStatus, 30000); loadInvestigations(); setInterval(loadInvestigations, 15000); loadModels(); input.focus();
 })();
 </script>
