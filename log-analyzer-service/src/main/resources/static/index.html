@@ -128,7 +128,7 @@
     <button class="menu-btn" id="sidebarToggle" aria-label="Toggle investigations">☰</button>
     <div class="brand-block">
       <div class="brand">VANTAGE</div>
-      <div class="brand-tag">Agentic log, code &amp; ticket analysis for OltMgr/DCI</div>
+      <div class="brand-tag">AI assistant for OltMgr</div>
     </div>
     <div class="spacer"></div>
     <div class="toolgroups" id="toolgroups" aria-live="polite"></div>
@@ -150,8 +150,8 @@
               <div class="mark">VANTAGE</div>
               <div class="role">log analyzer</div>
             </div>
-            <h1>Vantage investigates OltMgr issues by reading your logs, your codebase, and your ticket history — together.</h1>
-            <p>Ask a question in plain language. Vantage routes it to the right source automatically, cites what it found, and remembers this conversation so you can ask follow-ups without repeating context.</p>
+            <h1>Ask Vantage about OltMgr.</h1>
+            <p>Vantage answers questions about OltMgr using your logs, code, and Jira history, and remembers the conversation so you can ask follow-ups.</p>
             <div class="capabilities">
               <div class="cap"><b>Logs</b> — search indexed OltMgr events</div>
               <div class="cap"><b>Code</b> — search &amp; browse oltmgr/dci</div>
@@ -250,8 +250,8 @@
     var brandRow = el("div", "welcome-brand");
     brandRow.appendChild(el("div", "mark", "VANTAGE")); brandRow.appendChild(el("div", "role", "log analyzer"));
     wrap.appendChild(brandRow);
-    wrap.appendChild(el("h1", null, "Vantage investigates OltMgr issues by reading your logs, your codebase, and your ticket history — together."));
-    wrap.appendChild(el("p", null, "Ask a question in plain language. Vantage routes it to the right source automatically, cites what it found, and remembers this conversation so you can ask follow-ups without repeating context."));
+    wrap.appendChild(el("h1", null, "Ask Vantage about OltMgr."));
+    wrap.appendChild(el("p", null, "Vantage answers questions about OltMgr using your logs, code, and Jira history, and remembers the conversation so you can ask follow-ups."));
     var caps = el("div", "capabilities");
     [["Logs", "search indexed OltMgr events"], ["Code", "search & browse oltmgr/dci"], ["Jira", "check past tickets for similar issues"]].forEach(function (pair) {
       var cap = el("div", "cap"); cap.appendChild(el("b", null, pair[0])); cap.appendChild(document.createTextNode(" — " + pair[1])); caps.appendChild(cap);
@@ -268,10 +268,19 @@
   }
   function connectActivity(investigationId) {
     disconnectActivity(); activityFeed.innerHTML = "";
+    var errorCount = 0;
     eventSource = new EventSource("/api/investigations/" + investigationId + "/activity");
     livePulse.textContent = "live"; livePulse.classList.remove("off");
     eventSource.onmessage = function (e) { try { renderActivityEvent(JSON.parse(e.data)); } catch (err) {} };
-    eventSource.onerror = function () { livePulse.textContent = "reconnecting…"; };
+    eventSource.onerror = function () {
+      errorCount++;
+      // Give up after a few failures rather than retrying forever — most
+      // likely cause is the server restarted and this investigation ID no
+      // longer exists (investigations are in-memory only), which will never
+      // resolve itself no matter how many times the browser retries.
+      if (errorCount >= 3) { disconnectActivity(); return; }
+      livePulse.textContent = "reconnecting…";
+    };
   }
   function disconnectActivity() {
     if (eventSource) { eventSource.close(); eventSource = null; }

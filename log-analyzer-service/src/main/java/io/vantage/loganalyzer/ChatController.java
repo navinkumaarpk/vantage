@@ -42,7 +42,20 @@ import io.vantage.agentcore.streaming.AgentActivityEvent;
  * is on the classpath — neither VISTA nor Vantage manually construct one).
  * The only real difference is VISTA uses one fixed ID; Vantage uses
  * investigation.id so each investigation gets its own independent memory.
+ *
  * ============================================================================
+ * ACTIVITY GRANULARITY (widened 2026-07-27, still deliberately bounded)
+ * ============================================================================
+ * Publishes 4 real events per turn: routing decision, LLM call started, LLM
+ * call finished (succeeded/failed). All genuinely observable from code this
+ * class already controls -- no Spring AI internals hooking needed. What this
+ * still can't show: which *specific* underlying tool got called within a
+ * toolgroup (e.g. search_by_symptom vs. find_definition inside "code") --
+ * that decision happens inside Spring AI's tool-calling loop, which isn't
+ * something this class observes. Getting that level of detail would need
+ * hooking that internal loop, deliberately not attempted given how many
+ * wrong guesses unverified Spring AI internals have cost this session
+ * already. If finer granularity becomes important later, revisit then.
  */
 @RestController
 public class ChatController {
@@ -91,12 +104,19 @@ public class ChatController {
         Optional<McpSyncClient> client = toolgroup.flatMap(registry::get);
 
         investigation.addTurn(new Investigation.Turn("user", request.message(), null, false, Instant.now()));
-        investigation.activity.publish(AgentActivityEvent.started(investigation.id, toolgroup.orElse("none"), "chat_turn"));
+
+        // Real, safe incremental events -- see class javadoc note below on why
+        // these stop short of true per-tool-call visibility.
+        investigation.activity.publish(toolgroup.isPresent()
+                ? AgentActivityEvent.succeeded(investigation.id, toolgroup.get(), "routing", "Routed to '" + toolgroup.get() + "'")
+                : AgentActivityEvent.succeeded(investigation.id, "none", "routing", "No specific toolgroup matched"));
 
         if (toolgroup.isPresent() && client.isEmpty()) {
             log.warn("Routed to toolgroup '{}' but it is not currently registered", toolgroup.get());
             return respond(investigation, toolgroup.get(), "that capability is not currently connected", true);
         }
+
+        investigation.activity.publish(AgentActivityEvent.started(investigation.id, toolgroup.orElse("none"), "llm_call"));
 
         try {
             ChatClient.ChatClientRequestSpec promptSpec = chatClient.prompt()
@@ -110,13 +130,13 @@ public class ChatController {
 
             investigation.addTurn(new Investigation.Turn("agent", answer, toolgroup.orElse("none"), false, Instant.now()));
             investigation.activity.publish(AgentActivityEvent.succeeded(
-                    investigation.id, toolgroup.orElse("none"), "chat_turn", "answered"));
+                    investigation.id, toolgroup.orElse("none"), "llm_call", "Answer ready"));
 
             return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"), "investigationId", investigation.id);
         } catch (Exception e) {
             log.error("Chat request failed (toolgroup={}): {}", toolgroup.orElse("none"), e.getMessage(), e);
             investigation.activity.publish(AgentActivityEvent.failed(
-                    investigation.id, toolgroup.orElse("none"), "chat_turn", e.getMessage()));
+                    investigation.id, toolgroup.orElse("none"), "llm_call", e.getMessage()));
             return respond(investigation, toolgroup.orElse(null), "something went wrong processing that request", true);
         }
     }
