@@ -133,9 +133,34 @@ public class ChatController {
         try {
             ChatClient.ChatClientRequestSpec promptSpec;
             if (useOllama) {
+                // Bug found and fixed (2026-07-27): responses were cutting off
+                // mid-generation (confirmed via a real test: stopped cold right
+                // after a markdown table header, no error). gpt-oss:20b natively
+                // supports up to 128K context, but Ollama's runtime default
+                // num_ctx is far smaller (often 2048-4096) unless explicitly
+                // raised -- the model's own capability doesn't help if the
+                // runtime never gives it the budget to use it. This bites hardest
+                // on the "code" toolgroup specifically, where tool results
+                // (get_source_context returning up to ~50 lines, stacked search
+                // matches) plus the system prompt can consume most of a small
+                // default window before generation even starts. Raised both the
+                // context window and the output-length cap explicitly.
+                OllamaChatOptions.Builder optionsBuilder = OllamaChatOptions.builder()
+                        .model(ollamaModelName)
+                        .numCtx(8192)
+                        .numPredict(4096);
+                // GPT-OSS is a reasoning model whose actual answer can land in a
+                // separate "thinking" field rather than "content" -- and per
+                // Ollama's own docs, it specifically REQUIRES an explicit thinking
+                // level (low/medium/high); passing nothing or a boolean is silently
+                // ignored. "low" keeps reasoning brief since we want direct answers
+                // for tool-grounded investigation queries, not deep chain-of-thought.
+                if (ollamaModelName != null && ollamaModelName.startsWith("gpt-oss")) {
+                    optionsBuilder.thinkLow();
+                }
                 promptSpec = ollamaClient.prompt()
                         .advisors(a -> a.advisors(memoryAdvisor).param(ChatMemory.CONVERSATION_ID, investigation.id))
-                        .options(OllamaChatOptions.builder().model(ollamaModelName))
+                        .options(optionsBuilder)
                         .system(SYSTEM_PROMPT)
                         .user(request.message());
             } else {
@@ -147,13 +172,31 @@ public class ChatController {
             if (client.isPresent()) {
                 promptSpec = promptSpec.tools(new SyncMcpToolCallbackProvider(client.get()));
             }
-            String answer = promptSpec.call().content();
+
+            // Fallback for reasoning models that can put their real answer in a
+            // "thinking" metadata field instead of "content" under some
+            // conditions -- not fully confirmed which conditions trigger this
+            // (tool-calling is the leading theory, not verified), but the
+            // fallback is harmless when content is already populated normally.
+            var chatResponse = promptSpec.call().chatResponse();
+            String answer = chatResponse.getResult().getOutput().getText();
+            if (answer == null || answer.isBlank()) {
+                Object thinking = chatResponse.getResult().getMetadata().get("thinking");
+                if (thinking != null && !thinking.toString().isBlank()) {
+                    log.warn("Model '{}' returned empty content; falling back to 'thinking' metadata field", modelKey);
+                    answer = thinking.toString();
+                } else {
+                    answer = "(The model returned an empty response. This can happen with reasoning models under "
+                            + "certain conditions -- try rephrasing, or switch models if it persists.)";
+                }
+            }
 
             investigation.addTurn(new Investigation.Turn("agent", answer, toolgroup.orElse("none"), false, Instant.now()));
             investigation.activity.publish(AgentActivityEvent.succeeded(
                     investigation.id, toolgroup.orElse("none"), "llm_call", "Answer ready"));
 
-            return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"), "investigationId", investigation.id);
+            return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"),
+                    "investigationId", investigation.id, "modelUsed", modelKey);
         } catch (Exception e) {
             log.error("Chat request failed (toolgroup={}, model={}): {}", toolgroup.orElse("none"), modelKey, e.getMessage(), e);
             investigation.activity.publish(AgentActivityEvent.failed(

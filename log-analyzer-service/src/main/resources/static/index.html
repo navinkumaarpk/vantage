@@ -199,6 +199,7 @@
       busy = false, currentInvestigationId = null, eventSource = null;
   var EXPECTED = ["logs", "code", "jira_rag"];
   var LABEL = { logs: "logs", code: "code", jira_rag: "jira" };
+  var MODEL_LABELS = {};
 
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
   function scrollDown() { main.scrollTop = main.scrollHeight; }
@@ -210,6 +211,7 @@
         var opt = document.createElement("option");
         opt.value = m.key; opt.textContent = m.label;
         modelSelect.appendChild(opt);
+        MODEL_LABELS[m.key] = m.label;
       });
     }).catch(function () {});
   }
@@ -331,12 +333,13 @@
     paint(); var timer = setInterval(paint, 100); scrollDown();
     return { done: function () { clearInterval(timer); return ((Date.now() - start) / 1000).toFixed(1); }, node: wrap };
   }
-  function fillAgent(node, text, toolgroup, seconds, degraded) {
+  function fillAgent(node, text, toolgroup, seconds, degraded, modelKey) {
     node.innerHTML = ""; if (degraded) node.classList.add("degraded");
     var head = el("div", "agent-head"); head.appendChild(el("div", "agent-label", "AGENT"));
     if (degraded) head.appendChild(el("div", "badge warn", "degraded"));
     else if (toolgroup && toolgroup !== "none") head.appendChild(el("div", "badge tool", LABEL[toolgroup] || toolgroup));
     else head.appendChild(el("div", "badge", "no tool used"));
+    if (modelKey) head.appendChild(el("div", "badge", MODEL_LABELS[modelKey] || modelKey));
     if (seconds) head.appendChild(el("div", "badge time", seconds + "s"));
     node.appendChild(head); node.appendChild(el("div", "agent-body", text)); scrollDown();
   }
@@ -363,7 +366,7 @@
       .then(function (r) { if (!r.ok) throw new Error("Request failed (" + r.status + ")"); return r.json(); })
       .then(function (d) {
         clearTimeout(timeoutId);
-        var secs = pending.done(); fillAgent(pending.node, d.answer, d.toolgroupUsed, secs, d.degraded === true);
+        var secs = pending.done(); fillAgent(pending.node, d.answer, d.toolgroupUsed, secs, d.degraded === true, d.modelUsed);
         if (d.investigationId && d.investigationId !== currentInvestigationId) currentInvestigationId = d.investigationId;
         if (isFirstMessage) connectActivity(currentInvestigationId);
         loadInvestigations();
