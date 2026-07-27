@@ -23,9 +23,4 @@ vantage:
     username: elastic
     password: ${ES_PASSWORD}
   upload:
-    allowed-origin: http://SERVER3-IP:8081    # Server3's own IP (where log-analyzer-service
-                                                # runs) -- fill this in; I mistakenly copied
-                                                # Server1's IP here originally, since this is
-                                                # the first config that's ever needed to
-                                                # reference Server3's own address rather than
-                                                # be referenced BY something else
+    allowed-origin: http://192.168.1.109:8081
