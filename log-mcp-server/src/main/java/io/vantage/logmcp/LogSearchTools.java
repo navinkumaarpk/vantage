@@ -40,7 +40,8 @@ public class LogSearchTools {
             + "Returns matching log entries, newest first, up to 50 results.")
     public List<LogEntry> searchLogs(
             @McpToolParam(description = "Free-text match against the log message", required = false) String query,
-            @McpToolParam(description = "Exact R-OLT MAC address to filter by", required = false) String roltMac) {
+            @McpToolParam(description = "Exact R-OLT MAC address to filter by", required = false) String roltMac,
+            @McpToolParam(description = "Exact case name to filter by, for logs uploaded and tagged with a case", required = false) String caseName) {
         try {
             SearchResponse<LogDocument> response = esClient.search(s -> s
                     .index(INDEX)
@@ -53,6 +54,9 @@ public class LogSearchTools {
                         if (roltMac != null && !roltMac.isBlank()) {
                             b.filter(f -> f.term(t -> t.field("rolt_mac").value(roltMac)));
                         }
+                        if (caseName != null && !caseName.isBlank()) {
+                            b.filter(f -> f.term(t -> t.field("case_name").value(caseName)));
+                        }
                         return b;
                     })),
                     LogDocument.class
@@ -61,7 +65,9 @@ public class LogSearchTools {
             return response.hits().hits().stream()
                     .map(Hit::source)
                     .filter(java.util.Objects::nonNull)
-                    .map(doc -> new LogEntry(doc.timestamp, doc.roltMac, doc.className, doc.line, doc.event, doc.message))
+                    .map(doc -> new LogEntry(
+                            doc.timestamp, doc.message, doc.roltMac, doc.className, doc.line, doc.event,
+                            doc.level, doc.logger, doc.sourceFile, doc.sourceLine, doc.caseName, doc.jiraTicket, doc.sourceFileName))
                     .toList();
         } catch (Exception e) {
             throw new RuntimeException("search_logs failed: " + e.getMessage(), e);
