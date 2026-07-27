@@ -73,8 +73,23 @@
   .badge.tool { color: var(--brass); border-color: var(--brass-dim); }
   .badge.warn { color: var(--alert); border-color: var(--alert); background: rgba(226,84,45,0.08); }
   .badge.time { color: var(--faint); }
-  .agent-body { font-size: 14px; line-height: 1.7; white-space: pre-wrap; word-wrap: break-word; }
+  .agent-body { font-size: 14px; line-height: 1.7; word-wrap: break-word; }
+  .agent-body p { margin: 0 0 12px; }
+  .agent-body p:last-child { margin-bottom: 0; }
+  .agent-body strong { color: var(--text); font-weight: 600; }
+  .agent-body ul, .agent-body ol { margin: 0 0 12px; padding-left: 22px; }
+  .agent-body li { margin-bottom: 4px; }
+  .agent-body h1, .agent-body h2, .agent-body h3, .agent-body h4 { font-size: 14.5px; font-weight: 600; color: var(--brass); margin: 16px 0 8px; letter-spacing: 0.01em; }
+  .agent-body h1:first-child, .agent-body h2:first-child, .agent-body h3:first-child { margin-top: 0; }
+  .agent-body blockquote { border-left: 2px solid var(--brass-dim); margin: 0 0 12px; padding: 2px 0 2px 14px; color: var(--dim); }
+  .agent-body a { color: var(--brass); text-decoration: underline; text-decoration-color: var(--brass-dim); }
   .agent-body code { font-family: var(--mono); font-size: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; }
+  .agent-body pre { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 12px 14px; overflow-x: auto; margin: 0 0 12px; }
+  .agent-body pre code { background: none; border: none; padding: 0; font-size: 12.5px; line-height: 1.55; color: var(--text); }
+  .agent-body table { width: 100%; border-collapse: collapse; margin: 0 0 14px; font-size: 13px; overflow-x: auto; display: block; }
+  .agent-body th, .agent-body td { border: 1px solid var(--line); padding: 7px 11px; text-align: left; vertical-align: top; }
+  .agent-body th { background: var(--panel); color: var(--brass); font-family: var(--mono); font-size: 11px; letter-spacing: 0.03em; font-weight: 500; }
+  .agent-body tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
   .msg-agent.degraded .agent-body { color: var(--amber); }
   .pending { display: flex; align-items: center; gap: 16px; padding: 4px 0; }
   .gauge { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 24px; font-weight: 500; color: var(--brass); letter-spacing: 0.02em; min-width: 76px; }
@@ -127,6 +142,8 @@
     .brand-tag { display: none; }
   }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
 </head>
 <body>
   <header>
@@ -341,7 +358,9 @@
     else head.appendChild(el("div", "badge", "no tool used"));
     if (modelKey) head.appendChild(el("div", "badge", MODEL_LABELS[modelKey] || modelKey));
     if (seconds) head.appendChild(el("div", "badge time", seconds + "s"));
-    node.appendChild(head); node.appendChild(el("div", "agent-body", text)); scrollDown();
+    var body = el("div", "agent-body");
+    body.innerHTML = DOMPurify.sanitize(marked.parse(text));
+    node.appendChild(head); node.appendChild(body); scrollDown();
   }
   function send() {
     var text = input.value.trim(); if (!text || busy) return;
