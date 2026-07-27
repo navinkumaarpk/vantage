@@ -4,6 +4,7 @@ spring:
   ai:
     mcp:
       server:
+        name: jira-rag-mcp-server
         protocol: STREAMABLE
         annotation-scanner:
           enabled: true

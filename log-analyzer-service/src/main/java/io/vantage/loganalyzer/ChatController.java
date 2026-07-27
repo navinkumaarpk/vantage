@@ -1,11 +1,14 @@
 package io.vantage.loganalyzer;
 
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -14,30 +17,32 @@ import org.springframework.web.bind.annotation.RestController;
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.vantage.agentcore.mcp.McpClientRegistry;
 import io.vantage.agentcore.router.ToolgroupRouter;
+import io.vantage.agentcore.streaming.AgentActivityEvent;
 
 /**
- * <strong>Not verified against real dependencies</strong> — same caveat
- * class as the earlier MCP client wiring. The ChatClient fluent API shape
- * (.prompt().user().tools().call().content()) and SyncMcpToolCallbackProvider's
- * exact package are best-effort based on the pattern documented in
- * agent-core's README, not compiled against the real spring-ai-starter-model-openai
- * jar in this sandbox.
+ * ============================================================================
+ * MEMORY WIRING — this is the direct equivalent of VISTA's ChatService.
+ * ============================================================================
  *
- * <p>This is the first real end-to-end path: user message -> router picks a
- * toolgroup (or none) -> if picked, that toolgroup's MCP tools get attached
- * to the LLM call, scoped to just that one toolgroup's schemas per the
- * context-control design from the architecture discussion -> LLM decides
- * whether to actually call the tool and synthesizes a response either way.
+ * VISTA (single global session):
+ *   private static final String SESSION_ID = "vista-default-session";
+ *   this.memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory).build();
+ *   ...
+ *   ollamaClient.prompt()
+ *       .advisors(a -> a.advisors(memoryAdvisor).param(ChatMemory.CONVERSATION_ID, SESSION_ID))
  *
- * <p><strong>Resilience added 2026-07-26:</strong> previously the whole
- * flow — registry lookup, tool attachment, the actual LLM call — had zero
- * error handling. Any failure (a toolgroup unregistered because it never
- * connected, per agent-core's matching fix; or a registered toolgroup whose
- * session died after the fact, the gap that fix explicitly doesn't cover)
- * would bubble up as an unhandled exception and a generic 500. Now wrapped
- * so a broken toolgroup degrades this one request gracefully — a clear
- * message and {@code degraded: true} in the response — instead of an
- * opaque failure.
+ * Vantage (below) — identical pattern, extended to per-investigation
+ * conversation IDs instead of one hardcoded global session, since we support
+ * multiple concurrent investigations (VISTA doesn't):
+ *   .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())   <- constructor, below
+ *   .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, investigation.id))    <- per-request, in chat()
+ *
+ * Same advisor class, same ChatMemory.CONVERSATION_ID key, same auto-configured
+ * ChatMemory bean (Spring AI provides this automatically once a model starter
+ * is on the classpath — neither VISTA nor Vantage manually construct one).
+ * The only real difference is VISTA uses one fixed ID; Vantage uses
+ * investigation.id so each investigation gets its own independent memory.
+ * ============================================================================
  */
 @RestController
 public class ChatController {
@@ -47,70 +52,98 @@ public class ChatController {
     private final ChatClient chatClient;
     private final ToolgroupRouter router;
     private final McpClientRegistry registry;
+    private final InvestigationStore investigations;
 
-    public ChatController(ChatClient.Builder chatClientBuilder, ToolgroupRouter router, McpClientRegistry registry) {
-        this.chatClient = chatClientBuilder.build();
+    public ChatController(ChatClient.Builder chatClientBuilder, ChatMemory chatMemory,
+                           ToolgroupRouter router, McpClientRegistry registry, InvestigationStore investigations) {
+        this.chatClient = chatClientBuilder
+                .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
+                .build();
         this.router = router;
         this.registry = registry;
+        this.investigations = investigations;
     }
 
-    public record ChatRequest(String message) {}
+    public record ChatRequest(String message, String investigationId) {}
 
     private static final String SYSTEM_PROMPT = """
             You have access to specialized tools for this request when a relevant toolgroup is attached.
             When a tool is available, call it directly using your best interpretation of the user's message
-            as input — extract the relevant search terms, symbol names, or anomaly description yourself
+            as input - extract the relevant search terms, symbol names, or anomaly description yourself
             rather than asking the user to restate or clarify before you try.
 
-            If a tool call fails or errors out (a connection problem, a timeout, a system error — anything
+            If a tool call fails or errors out (a connection problem, a timeout, a system error - anything
             that isn't simply "no results found"), tell the user plainly that the underlying capability is
             currently unavailable and the request could not be completed right now. Do not respond by asking
-            the user for more detail or rephrasing the question — more detail from them cannot fix a broken
+            the user for more detail or rephrasing the question - more detail from them cannot fix a broken
             connection, and implying otherwise is misleading. Only ask a genuine clarifying question when the
             request itself is ambiguous about which tool or data to use, before any tool call is attempted.
+
+            This is an ongoing conversation - treat earlier turns as real context. A follow-up like "what
+            about the other one" or "check that same device" refers back to what was already discussed;
+            don't ask the user to repeat information already established earlier in this conversation.
             """;
 
     @PostMapping("/api/chat")
     public Map<String, Object> chat(@RequestBody ChatRequest request) {
+        Investigation investigation = resolveInvestigation(request);
         Optional<String> toolgroup = router.route(request.message(), registry.all().keySet());
         Optional<McpSyncClient> client = toolgroup.flatMap(registry::get);
 
+        investigation.addTurn(new Investigation.Turn("user", request.message(), null, false, Instant.now()));
+        investigation.activity.publish(AgentActivityEvent.started(investigation.id, toolgroup.orElse("none"), "chat_turn"));
+
         if (toolgroup.isPresent() && client.isEmpty()) {
-            // Defense-in-depth: shouldn't happen today since the router only
-            // sees currently-registered toolgroups, but don't rely on that
-            // invariant holding forever (e.g. if a future deregister-on-
-            // failure mechanism gets added).
             log.warn("Routed to toolgroup '{}' but it is not currently registered", toolgroup.get());
-            return degradedResponse(toolgroup.get(), "that capability is not currently connected");
+            return respond(investigation, toolgroup.get(), "that capability is not currently connected", true);
         }
 
         try {
             ChatClient.ChatClientRequestSpec promptSpec = chatClient.prompt()
                     .system(SYSTEM_PROMPT)
-                    .user(request.message());
+                    .user(request.message())
+                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, investigation.id));
             if (client.isPresent()) {
                 promptSpec = promptSpec.tools(new SyncMcpToolCallbackProvider(client.get()));
             }
             String answer = promptSpec.call().content();
-            return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"));
+
+            investigation.addTurn(new Investigation.Turn("agent", answer, toolgroup.orElse("none"), false, Instant.now()));
+            investigation.activity.publish(AgentActivityEvent.succeeded(
+                    investigation.id, toolgroup.orElse("none"), "chat_turn", "answered"));
+
+            return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"), "investigationId", investigation.id);
         } catch (Exception e) {
-            // Covers the real gap: a toolgroup that connected fine at
-            // startup but whose session has since died (server restarted,
-            // crashed, network dropped) — no reconnect logic exists yet, so
-            // this is what actually catches that case today.
             log.error("Chat request failed (toolgroup={}): {}", toolgroup.orElse("none"), e.getMessage(), e);
-            return degradedResponse(toolgroup.orElse(null), "something went wrong processing that request");
+            investigation.activity.publish(AgentActivityEvent.failed(
+                    investigation.id, toolgroup.orElse("none"), "chat_turn", e.getMessage()));
+            return respond(investigation, toolgroup.orElse(null), "something went wrong processing that request", true);
         }
     }
 
-    private Map<String, Object> degradedResponse(String toolgroup, String reason) {
+    private Investigation resolveInvestigation(ChatRequest request) {
+        if (request.investigationId() != null) {
+            return investigations.get(request.investigationId())
+                    .orElseGet(() -> investigations.create(titleFrom(request.message())));
+        }
+        return investigations.create(titleFrom(request.message()));
+    }
+
+    private String titleFrom(String message) {
+        String trimmed = message.trim();
+        return trimmed.length() > 60 ? trimmed.substring(0, 60) + "..." : trimmed;
+    }
+
+    private Map<String, Object> respond(Investigation investigation, String toolgroup, String reason, boolean degraded) {
         String toolgroupPart = (toolgroup != null) ? " ('" + toolgroup + "')" : "";
+        String answer = "This request couldn't be completed" + toolgroupPart + " - " + reason
+                + ". The issue has been logged; try again shortly.";
+        investigation.addTurn(new Investigation.Turn("agent", answer, toolgroup, true, Instant.now()));
         return Map.of(
-                "answer", "This request couldn't be completed" + toolgroupPart + " — " + reason
-                        + ". The issue has been logged; try again shortly.",
+                "answer", answer,
                 "toolgroupUsed", "none",
-                "degraded", true
+                "investigationId", investigation.id,
+                "degraded", degraded
         );
     }
 }
-

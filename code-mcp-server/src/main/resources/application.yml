@@ -4,6 +4,7 @@ spring:
   ai:
     mcp:
       server:
+        name: code-mcp-server
         protocol: STREAMABLE
         annotation-scanner:
           enabled: true

@@ -10,6 +10,8 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.ai.mcp.annotation.McpTool;
 import org.springframework.ai.mcp.annotation.McpToolParam;
 import org.springframework.beans.factory.annotation.Value;
@@ -42,6 +44,8 @@ import org.springframework.web.client.RestTemplate;
  */
 @Component
 public class CodeSearchTools {
+
+    private static final Logger log = LoggerFactory.getLogger(CodeSearchTools.class);
 
     private final RestTemplate restTemplate = new RestTemplate();
     private final ObjectMapper objectMapper = new ObjectMapper()
@@ -88,15 +92,35 @@ public class CodeSearchTools {
     public String getSourceContext(
             @McpToolParam(description = "OpenGrok-relative file path, as returned by other tools", required = true) String file,
             @McpToolParam(description = "1-indexed line number to center the context window on", required = true) int line) {
+
+        if (file == null || file.isBlank()) {
+            throw new IllegalArgumentException("get_source_context: 'file' must not be blank");
+        }
+        if (line < 1) {
+            throw new IllegalArgumentException("get_source_context: 'line' must be a positive integer, got " + line);
+        }
+
         try {
-            Path path = Path.of(sourceRoot, file);
+            // Bug found and fixed (2026-07-26): Path.of(sourceRoot, file) silently
+            // discards sourceRoot whenever file is absolute (starts with "/"), which
+            // it always does - OpenGrok's returned paths are always of the form
+            // "/oltmgr/...". Java/Unix path resolution treats an absolute second
+            // component as replacing the first entirely, not joining onto it. This
+            // meant every call looked up "/oltmgr/..." directly on disk instead of
+            // "/opengrok/src/oltmgr/...", which never exists. Strip the leading
+            // slash before joining so it resolves as a genuinely relative path.
+            String relativeFile = file.startsWith("/") ? file.substring(1) : file;
+            Path path = Path.of(sourceRoot, relativeFile);
+
             List<String> lines = Files.readAllLines(path);
             int contextLines = 25;
             int start = Math.max(0, line - 1 - contextLines);
             int end = Math.min(lines.size(), line - 1 + contextLines + 1);
             return String.join("\n", lines.subList(start, end));
         } catch (Exception e) {
-            throw new RuntimeException("get_source_context failed for " + file + ":" + line + " — " + e.getMessage(), e);
+            log.error("get_source_context failed for file='{}' line={}", file, line, e);
+            throw new RuntimeException("get_source_context failed for " + file + ":" + line
+                    + " - " + e.getClass().getSimpleName() + ": " + e.getMessage(), e);
         }
     }
 

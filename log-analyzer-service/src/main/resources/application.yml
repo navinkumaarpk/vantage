@@ -8,7 +8,7 @@ spring:
       chat:
         options:
           model: /opt/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
-          max-tokens: 512
+          max-tokens: 2000
 
 server:
   port: 8081
