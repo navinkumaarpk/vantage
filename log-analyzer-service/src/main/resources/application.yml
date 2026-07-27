@@ -10,7 +10,7 @@ spring:
           model: /opt/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf
           max-tokens: 2000
     ollama:
-      base-url: http://${OLLAMA_HOSTNAME}:11434
+      base-url: http://10.13.218.80:11434
 
 server:
   port: 8081

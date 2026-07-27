@@ -133,7 +133,7 @@
     <button class="menu-btn" id="sidebarToggle" aria-label="Toggle investigations">☰</button>
     <div class="brand-block">
       <div class="brand">VANTAGE</div>
-      <div class="brand-tag">AI assistant for OltMgr</div>
+      <div class="brand-tag">AI assistant for application diagnostics</div>
     </div>
     <div class="spacer"></div>
     <select class="model-select" id="modelSelect" aria-label="Model"></select>
@@ -156,11 +156,11 @@
               <div class="mark">VANTAGE</div>
               <div class="role">log analyzer</div>
             </div>
-            <h1>Ask Vantage about OltMgr.</h1>
-            <p>Vantage answers questions about OltMgr using your logs, code, and Jira history, and remembers the conversation so you can ask follow-ups.</p>
+            <h1>Hi, I'm Vantage.</h1>
+            <p>I can help you analyze application logs, cross-reference your codebase for matching anomalies, and match a root cause to a previous ticket.</p>
             <div class="capabilities">
-              <div class="cap"><b>Logs</b> — search indexed OltMgr events</div>
-              <div class="cap"><b>Code</b> — search &amp; browse oltmgr/dci</div>
+              <div class="cap"><b>Logs</b> — search indexed application logs</div>
+              <div class="cap"><b>Code</b> — search & browse the codebase</div>
               <div class="cap"><b>Jira</b> — check past tickets for similar issues</div>
             </div>
             <div class="examples" id="examples">
@@ -268,10 +268,10 @@
     var brandRow = el("div", "welcome-brand");
     brandRow.appendChild(el("div", "mark", "VANTAGE")); brandRow.appendChild(el("div", "role", "log analyzer"));
     wrap.appendChild(brandRow);
-    wrap.appendChild(el("h1", null, "Ask Vantage about OltMgr."));
-    wrap.appendChild(el("p", null, "Vantage answers questions about OltMgr using your logs, code, and Jira history, and remembers the conversation so you can ask follow-ups."));
+    wrap.appendChild(el("h1", null, "Hi, I'm Vantage."));
+    wrap.appendChild(el("p", null, "I can help you analyze application logs, cross-reference your codebase for matching anomalies, and match a root cause to a previous ticket."));
     var caps = el("div", "capabilities");
-    [["Logs", "search indexed OltMgr events"], ["Code", "search & browse oltmgr/dci"], ["Jira", "check past tickets for similar issues"]].forEach(function (pair) {
+    [["Logs", "search indexed application logs"], ["Code", "search & browse the codebase"], ["Jira", "check past tickets for similar issues"]].forEach(function (pair) {
       var cap = el("div", "cap"); cap.appendChild(el("b", null, pair[0])); cap.appendChild(document.createTextNode(" — " + pair[1])); caps.appendChild(cap);
     });
     wrap.appendChild(caps);
@@ -344,15 +344,38 @@
     var text = input.value.trim(); if (!text || busy) return;
     busy = true; sendBtn.disabled = true; addUser(text); input.value = ""; input.style.height = "auto";
     var pending = addPending(); var isFirstMessage = currentInvestigationId === null;
-    fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, investigationId: currentInvestigationId, modelKey: modelSelect.value }) })
+
+    // Client-side timeout — fetch() has no timeout by default, so without
+    // this a genuinely broken backend connection (unreachable Ollama host,
+    // etc.) leaves the UI waiting forever with no resolution. 3 minutes is
+    // generous enough not to falsely abort legitimate slow CPU generation
+    // (observed up to ~150s for complex prompts) while still bounding how
+    // long a truly broken request can leave the user hanging.
+    var controller = new AbortController();
+    var timeoutMs = 180000;
+    var timeoutId = setTimeout(function () { controller.abort(); }, timeoutMs);
+
+    fetch("/api/chat", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, investigationId: currentInvestigationId, modelKey: modelSelect.value }),
+      signal: controller.signal
+    })
       .then(function (r) { if (!r.ok) throw new Error("Request failed (" + r.status + ")"); return r.json(); })
       .then(function (d) {
+        clearTimeout(timeoutId);
         var secs = pending.done(); fillAgent(pending.node, d.answer, d.toolgroupUsed, secs, d.degraded === true);
         if (d.investigationId && d.investigationId !== currentInvestigationId) currentInvestigationId = d.investigationId;
         if (isFirstMessage) connectActivity(currentInvestigationId);
         loadInvestigations();
       })
-      .catch(function (err) { var secs = pending.done(); fillAgent(pending.node, "Couldn't reach the analyzer service. It may be restarting — try again in a moment.\n\n" + err.message, null, secs, true); })
+      .catch(function (err) {
+        clearTimeout(timeoutId);
+        var secs = pending.done();
+        var message = (err.name === "AbortError")
+          ? "This is taking much longer than expected (over " + Math.round(timeoutMs / 1000) + "s) and was cancelled. The selected model's backend may be unreachable — check it's actually running, then try again."
+          : "Couldn't reach the analyzer service. It may be restarting — try again in a moment.\n\n" + err.message;
+        fillAgent(pending.node, message, null, secs, true);
+      })
       .finally(function () { busy = false; sendBtn.disabled = false; input.focus(); pollStatus(); });
   }
   function closeMobilePanels() { sidebar.classList.remove("open"); activityCol.classList.remove("open"); }
