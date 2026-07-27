@@ -1,6 +1,8 @@
 package io.vantage.loganalyzer;
 
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -10,6 +12,11 @@ import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
 import org.springframework.ai.chat.memory.ChatMemory;
 import org.springframework.ai.mcp.SyncMcpToolCallbackProvider;
+import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.ai.ollama.api.OllamaChatOptions;
+import org.springframework.ai.openai.OpenAiChatModel;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
@@ -21,63 +28,57 @@ import io.vantage.agentcore.streaming.AgentActivityEvent;
 
 /**
  * ============================================================================
- * MEMORY WIRING — this is the direct equivalent of VISTA's ChatService.
+ * MULTI-MODEL SELECTION — mirrors VISTA's ChatService pattern.
+ *
+ * Bug found and fixed (2026-07-27): .options(OllamaChatOptions.builder()
+ * .model(x).build()) failed to compile -- ChatClientRequestSpec.options()
+ * is generic over the BUILDER type, not the built ChatOptions object. Fix
+ * confirmed directly from VISTA's own working code, which was pasted into
+ * this conversation: ".options(OllamaChatOptions.builder().model(x))" --
+ * no .build() call. Copying that exact shape below.
  * ============================================================================
- *
- * VISTA (single global session):
- *   private static final String SESSION_ID = "vista-default-session";
- *   this.memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory).build();
- *   ...
- *   ollamaClient.prompt()
- *       .advisors(a -> a.advisors(memoryAdvisor).param(ChatMemory.CONVERSATION_ID, SESSION_ID))
- *
- * Vantage (below) — identical pattern, extended to per-investigation
- * conversation IDs instead of one hardcoded global session, since we support
- * multiple concurrent investigations (VISTA doesn't):
- *   .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())   <- constructor, below
- *   .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, investigation.id))    <- per-request, in chat()
- *
- * Same advisor class, same ChatMemory.CONVERSATION_ID key, same auto-configured
- * ChatMemory bean (Spring AI provides this automatically once a model starter
- * is on the classpath — neither VISTA nor Vantage manually construct one).
- * The only real difference is VISTA uses one fixed ID; Vantage uses
- * investigation.id so each investigation gets its own independent memory.
- *
- * ============================================================================
- * ACTIVITY GRANULARITY (widened 2026-07-27, still deliberately bounded)
- * ============================================================================
- * Publishes 4 real events per turn: routing decision, LLM call started, LLM
- * call finished (succeeded/failed). All genuinely observable from code this
- * class already controls -- no Spring AI internals hooking needed. What this
- * still can't show: which *specific* underlying tool got called within a
- * toolgroup (e.g. search_by_symptom vs. find_definition inside "code") --
- * that decision happens inside Spring AI's tool-calling loop, which isn't
- * something this class observes. Getting that level of detail would need
- * hooking that internal loop, deliberately not attempted given how many
- * wrong guesses unverified Spring AI internals have cost this session
- * already. If finer granularity becomes important later, revisit then.
  */
 @RestController
 public class ChatController {
 
     private static final Logger log = LoggerFactory.getLogger(ChatController.class);
 
-    private final ChatClient chatClient;
+    private final ChatClient openAiClient;
+    private final ChatClient ollamaClient; // null if Ollama not configured/available at startup
+    private final MessageChatMemoryAdvisor memoryAdvisor;
+    private final List<ModelOption> modelOptions = new java.util.ArrayList<>();
+    private final Map<String, String> ollamaModelNamesByKey = new HashMap<>();
+
     private final ToolgroupRouter router;
     private final McpClientRegistry registry;
     private final InvestigationStore investigations;
 
-    public ChatController(ChatClient.Builder chatClientBuilder, ChatMemory chatMemory,
+    public ChatController(OpenAiChatModel openAiChatModel,
+                           ObjectProvider<OllamaChatModel> ollamaProvider,
+                           ChatMemory chatMemory,
+                           VantageOllamaProperties ollamaProperties,
                            ToolgroupRouter router, McpClientRegistry registry, InvestigationStore investigations) {
-        this.chatClient = chatClientBuilder
-                .defaultAdvisors(MessageChatMemoryAdvisor.builder(chatMemory).build())
-                .build();
+        this.memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory).build();
         this.router = router;
         this.registry = registry;
         this.investigations = investigations;
+
+        this.openAiClient = ChatClient.builder(openAiChatModel).build();
+        modelOptions.add(new ModelOption("server1", "Qwen2.5-7B (Server1, CPU)", "openai", null));
+
+        OllamaChatModel om = ollamaProvider.getIfAvailable();
+        if (om != null && !ollamaProperties.getModels().isEmpty()) {
+            this.ollamaClient = ChatClient.builder(om).build();
+            for (VantageOllamaProperties.ModelEntry entry : ollamaProperties.getModels()) {
+                modelOptions.add(new ModelOption(entry.getKey(), entry.getLabel(), "ollama", entry.getModelName()));
+                ollamaModelNamesByKey.put(entry.getKey(), entry.getModelName());
+            }
+        } else {
+            this.ollamaClient = null;
+        }
     }
 
-    public record ChatRequest(String message, String investigationId) {}
+    public record ChatRequest(String message, String investigationId, String modelKey) {}
 
     private static final String SYSTEM_PROMPT = """
             You have access to specialized tools for this request when a relevant toolgroup is attached.
@@ -97,16 +98,21 @@ public class ChatController {
             don't ask the user to repeat information already established earlier in this conversation.
             """;
 
+    @GetMapping("/api/models")
+    public List<ModelOption> models() {
+        return List.copyOf(modelOptions);
+    }
+
     @PostMapping("/api/chat")
     public Map<String, Object> chat(@RequestBody ChatRequest request) {
         Investigation investigation = resolveInvestigation(request);
         Optional<String> toolgroup = router.route(request.message(), registry.all().keySet());
         Optional<McpSyncClient> client = toolgroup.flatMap(registry::get);
+        String modelKey = (request.modelKey() != null) ? request.modelKey() : "server1";
+        String ollamaModelName = ollamaModelNamesByKey.get(modelKey);
 
         investigation.addTurn(new Investigation.Turn("user", request.message(), null, false, Instant.now()));
 
-        // Real, safe incremental events -- see class javadoc note below on why
-        // these stop short of true per-tool-call visibility.
         investigation.activity.publish(toolgroup.isPresent()
                 ? AgentActivityEvent.succeeded(investigation.id, toolgroup.get(), "routing", "Routed to '" + toolgroup.get() + "'")
                 : AgentActivityEvent.succeeded(investigation.id, "none", "routing", "No specific toolgroup matched"));
@@ -116,13 +122,28 @@ public class ChatController {
             return respond(investigation, toolgroup.get(), "that capability is not currently connected", true);
         }
 
+        boolean useOllama = ollamaModelName != null;
+        if (!"server1".equals(modelKey) && !useOllama) {
+            log.warn("Requested unknown or unavailable model key '{}'", modelKey);
+            return respond(investigation, toolgroup.orElse(null), "the requested model ('" + modelKey + "') is not currently available", true);
+        }
+
         investigation.activity.publish(AgentActivityEvent.started(investigation.id, toolgroup.orElse("none"), "llm_call"));
 
         try {
-            ChatClient.ChatClientRequestSpec promptSpec = chatClient.prompt()
-                    .system(SYSTEM_PROMPT)
-                    .user(request.message())
-                    .advisors(a -> a.param(ChatMemory.CONVERSATION_ID, investigation.id));
+            ChatClient.ChatClientRequestSpec promptSpec;
+            if (useOllama) {
+                promptSpec = ollamaClient.prompt()
+                        .advisors(a -> a.advisors(memoryAdvisor).param(ChatMemory.CONVERSATION_ID, investigation.id))
+                        .options(OllamaChatOptions.builder().model(ollamaModelName))
+                        .system(SYSTEM_PROMPT)
+                        .user(request.message());
+            } else {
+                promptSpec = openAiClient.prompt()
+                        .advisors(a -> a.advisors(memoryAdvisor).param(ChatMemory.CONVERSATION_ID, investigation.id))
+                        .system(SYSTEM_PROMPT)
+                        .user(request.message());
+            }
             if (client.isPresent()) {
                 promptSpec = promptSpec.tools(new SyncMcpToolCallbackProvider(client.get()));
             }
@@ -134,7 +155,7 @@ public class ChatController {
 
             return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"), "investigationId", investigation.id);
         } catch (Exception e) {
-            log.error("Chat request failed (toolgroup={}): {}", toolgroup.orElse("none"), e.getMessage(), e);
+            log.error("Chat request failed (toolgroup={}, model={}): {}", toolgroup.orElse("none"), modelKey, e.getMessage(), e);
             investigation.activity.publish(AgentActivityEvent.failed(
                     investigation.id, toolgroup.orElse("none"), "llm_call", e.getMessage()));
             return respond(investigation, toolgroup.orElse(null), "something went wrong processing that request", true);

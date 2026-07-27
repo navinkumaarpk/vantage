@@ -24,6 +24,11 @@
   .brand-tag { font-family: var(--sans); font-size: 12px; color: var(--faint); text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
   .spacer { flex: 1; }
   .toolgroups { display: flex; gap: 14px; align-items: center; }
+  .model-select {
+    font-family: var(--mono); font-size: 11px; color: var(--text); background: var(--raised);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; cursor: pointer; outline: none;
+  }
+  .model-select:focus-visible { border-color: var(--brass-dim); }
   .tg { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--dim); }
   .tg i { width: 6px; height: 6px; border-radius: 50%; background: var(--faint); flex-shrink: 0; }
   .tg.live i { background: var(--ok); box-shadow: 0 0 6px rgba(95,173,140,0.6); }
@@ -131,6 +136,7 @@
       <div class="brand-tag">AI assistant for OltMgr</div>
     </div>
     <div class="spacer"></div>
+    <select class="model-select" id="modelSelect" aria-label="Model"></select>
     <div class="toolgroups" id="toolgroups" aria-live="polite"></div>
     <button class="menu-btn" id="activityToggle" aria-label="Toggle activity feed">⋮</button>
   </header>
@@ -187,6 +193,7 @@
   "use strict";
   var thread = document.getElementById("thread"), main = document.getElementById("main"), input = document.getElementById("input"),
       sendBtn = document.getElementById("send"), welcome = document.getElementById("welcome"), tgWrap = document.getElementById("toolgroups"),
+      modelSelect = document.getElementById("modelSelect"),
       invList = document.getElementById("invList"), activityFeed = document.getElementById("activityFeed"), livePulse = document.getElementById("livePulse"),
       sidebar = document.getElementById("sidebar"), activityCol = document.getElementById("activityCol"),
       busy = false, currentInvestigationId = null, eventSource = null;
@@ -195,6 +202,17 @@
 
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
   function scrollDown() { main.scrollTop = main.scrollHeight; }
+
+  function loadModels() {
+    fetch("/api/models").then(function (r) { return r.json(); }).then(function (models) {
+      modelSelect.innerHTML = "";
+      models.forEach(function (m) {
+        var opt = document.createElement("option");
+        opt.value = m.key; opt.textContent = m.label;
+        modelSelect.appendChild(opt);
+      });
+    }).catch(function () {});
+  }
 
   function renderStatus(live, reachable) {
     tgWrap.innerHTML = "";
@@ -326,7 +344,7 @@
     var text = input.value.trim(); if (!text || busy) return;
     busy = true; sendBtn.disabled = true; addUser(text); input.value = ""; input.style.height = "auto";
     var pending = addPending(); var isFirstMessage = currentInvestigationId === null;
-    fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, investigationId: currentInvestigationId }) })
+    fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: text, investigationId: currentInvestigationId, modelKey: modelSelect.value }) })
       .then(function (r) { if (!r.ok) throw new Error("Request failed (" + r.status + ")"); return r.json(); })
       .then(function (d) {
         var secs = pending.done(); fillAgent(pending.node, d.answer, d.toolgroupUsed, secs, d.degraded === true);
@@ -345,7 +363,7 @@
   input.addEventListener("input", function () { input.style.height = "auto"; input.style.height = Math.min(input.scrollHeight, 150) + "px"; });
   document.getElementById("examples").addEventListener("click", function (e) { var btn = e.target.closest(".example"); if (!btn) return; input.value = btn.getAttribute("data-q"); send(); });
   document.getElementById("newInvestigation").addEventListener("click", function () { startNewInvestigation(); closeMobilePanels(); });
-  pollStatus(); setInterval(pollStatus, 30000); loadInvestigations(); setInterval(loadInvestigations, 15000); input.focus();
+  pollStatus(); setInterval(pollStatus, 30000); loadInvestigations(); setInterval(loadInvestigations, 15000); loadModels(); input.focus();
 })();
 </script>
 </body>
