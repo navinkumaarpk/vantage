@@ -22,5 +22,3 @@ vantage:
     port: 9200
     username: elastic
     password: ${ES_PASSWORD}
-  upload:
-    allowed-origin: http://192.168.1.109:8081

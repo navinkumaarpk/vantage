@@ -10,7 +10,6 @@ import java.util.ArrayList;
 import java.util.List;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
@@ -33,7 +32,6 @@ import org.springframework.web.multipart.MultipartFile;
  * with no clean success/failure feedback path back to the UI either way.
  */
 @RestController
-@CrossOrigin(origins = "${vantage.upload.allowed-origin}")
 public class LogUploadController {
 
     private static final Logger log = LoggerFactory.getLogger(LogUploadController.class);

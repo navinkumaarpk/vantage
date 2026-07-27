@@ -301,10 +301,17 @@
   var EXPECTED = ["logs", "code", "jira_rag"];
   var LABEL = { logs: "logs", code: "code", jira_rag: "jira" };
   var MODEL_LABELS = {};
-  // log-mcp-server lives on Server2, a different origin than this page
-  // (Server3) -- the upload endpoint has CORS configured specifically for
-  // this page's origin to allow the direct cross-origin call.
-  var UPLOAD_URL = "http://192.168.1.108:8091/api/logs/upload";
+  // Bug found and fixed (2026-07-27): this used to hardcode log-mcp-server's
+  // address (Server2) and call it directly from the browser, cross-origin.
+  // That broke for a real user testing this from their own workstation --
+  // net::ERR_CONNECTION_TIMED_OUT trying to reach Server2 directly, even
+  // though Server3-to-Server2 connectivity was confirmed fine via curl. The
+  // browser's network position isn't the same as Server3's. Now a plain
+  // same-origin relative path -- this page's own server (Server3) proxies
+  // to log-mcp-server server-to-server, over the path already confirmed
+  // working, and the frontend no longer needs to know Server2's address at
+  // all.
+  var UPLOAD_URL = "/api/logs/upload";
 
   function el(tag, cls, text) { var n = document.createElement(tag); if (cls) n.className = cls; if (text != null) n.textContent = text; return n; }
   function scrollDown() { main.scrollTop = main.scrollHeight; }

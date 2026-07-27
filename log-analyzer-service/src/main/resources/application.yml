@@ -11,11 +11,21 @@ spring:
           max-tokens: 2000
     ollama:
       base-url: http://10.13.218.80:11434
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
 
 server:
   port: 8081
 
 vantage:
+  log-mcp-server:
+    upload-url: http://192.168.1.108:8091/api/logs/upload    # Server3->Server2
+                                                                 # server-to-server hop,
+                                                                 # confirmed working via
+                                                                 # curl -- browser never
+                                                                 # calls this directly
   ollama:
     models:
       - key: gpt-oss-20b
