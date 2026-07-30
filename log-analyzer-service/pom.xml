@@ -27,7 +27,7 @@
             The starter auto-configures a reactive server, replacing/competing
             with the servlet/Tomcat stack this whole app runs on. This dependency
             exists only to get WebClient for consuming the Cursor sidecar's SSE
-            stream (io.vantage.loganalyzer.CursorAgentClient) -- a reactive HTTP
+            stream (io.vantage.loganalyzer.CursorAgentClient) - a reactive HTTP
             CLIENT, with no change to how this app serves requests.
         -->
         <dependency>
