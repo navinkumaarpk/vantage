@@ -40,9 +40,7 @@
         <module>agent-core</module>
         <module>log-analyzer-service</module>
         <module>testcase-generator-service</module>
-        <module>log-mcp-server</module>
-        <module>code-mcp-server</module>
-        <module>jira-rag-mcp-server</module>
+        <module>vantage-mcp-server</module>
     </modules>
 
     <properties>

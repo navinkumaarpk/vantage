@@ -44,7 +44,7 @@ public class LogUploadProxyController {
 
     private final RestClient restClient = RestClient.create();
 
-    @Value("${vantage.log-mcp-server.upload-url}")
+    @Value("${vantage.vantage-mcp-server.upload-url}")
     private String logMcpUploadUrl;
 
     @PostMapping("/api/logs/upload")

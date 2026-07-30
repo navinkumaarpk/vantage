@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: vantage-mcp-server
+  ai:
+    mcp:
+      server:
+        name: vantage-mcp-server
+        protocol: STREAMABLE
+        annotation-scanner:
+          enabled: true
+  servlet:
+    multipart:
+      max-file-size: 200MB
+      max-request-size: 200MB
+  datasource:
+    url: jdbc:postgresql://localhost:5432/vantage_rag
+    username: vantage
+    # Default-empty so a missing env var can't kill startup for EVERY toolgroup.
+    # This matters more now that all toolgroups share one process: before
+    # consolidation an unset ES_PASSWORD only broke log search, and it did
+    # exactly that during development. Connection problems now surface at
+    # tool-call time with a clear message instead of as a boot failure.
+    password: ${PG_PASSWORD:}
+
+server:
+  port: 8091
+
+vantage:
+  elasticsearch:
+    host: localhost
+    port: 9200
+    username: elastic
+    password: ${ES_PASSWORD:}
+  opengrok:
+    search-url: http://localhost:8080/source/api/v1/search
+    source-root: /opengrok/src
+  embedding:
+    url: http://192.168.1.107:8082/v1/embeddings

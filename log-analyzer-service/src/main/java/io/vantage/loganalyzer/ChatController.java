@@ -4,7 +4,6 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,7 +22,6 @@ import org.springframework.web.bind.annotation.RestController;
 
 import io.modelcontextprotocol.client.McpSyncClient;
 import io.vantage.agentcore.mcp.McpClientRegistry;
-import io.vantage.agentcore.router.ToolgroupRouter;
 import io.vantage.agentcore.streaming.AgentActivityEvent;
 
 /**
@@ -49,7 +47,6 @@ public class ChatController {
     private final List<ModelOption> modelOptions = new java.util.ArrayList<>();
     private final Map<String, String> ollamaModelNamesByKey = new HashMap<>();
 
-    private final ToolgroupRouter router;
     private final McpClientRegistry registry;
     private final InvestigationStore investigations;
 
@@ -57,9 +54,8 @@ public class ChatController {
                            ObjectProvider<OllamaChatModel> ollamaProvider,
                            ChatMemory chatMemory,
                            VantageOllamaProperties ollamaProperties,
-                           ToolgroupRouter router, McpClientRegistry registry, InvestigationStore investigations) {
+                           McpClientRegistry registry, InvestigationStore investigations) {
         this.memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory).build();
-        this.router = router;
         this.registry = registry;
         this.investigations = investigations;
 
@@ -81,10 +77,17 @@ public class ChatController {
     public record ChatRequest(String message, String investigationId, String modelKey) {}
 
     private static final String SYSTEM_PROMPT = """
-            You have access to specialized tools for this request when a relevant toolgroup is attached.
-            When a tool is available, call it directly using your best interpretation of the user's message
-            as input - extract the relevant search terms, symbol names, or anomaly description yourself
-            rather than asking the user to restate or clarify before you try.
+            You have tools for searching application logs, searching the codebase, and searching past Jira
+            tickets. Choose whichever fit and call them directly, using your own interpretation of the
+            user's message to fill in arguments - extract the relevant search terms, symbol names, or
+            anomaly description yourself rather than asking the user to restate before you try.
+
+            When investigating logs, work in two steps rather than answering from a single search. First
+            locate an anchor entry, then expand: pass the anchor's timestamp AND its thread to
+            get_log_context to see the chronological sequence leading to the failure. This matters because
+            one device often appears under several different identifiers across log lines, so the entries
+            explaining WHY something failed frequently do not mention the identifier you searched for --
+            but they do share the worker thread. On an unfamiliar log set call summarize_logs first.
 
             If a tool call fails or errors out (a connection problem, a timeout, a system error - anything
             that isn't simply "no results found"), tell the user plainly that the underlying capability is
@@ -106,29 +109,32 @@ public class ChatController {
     @PostMapping("/api/chat")
     public Map<String, Object> chat(@RequestBody ChatRequest request) {
         Investigation investigation = resolveInvestigation(request);
-        Optional<String> toolgroup = router.route(request.message(), registry.all().keySet());
-        Optional<McpSyncClient> client = toolgroup.flatMap(registry::get);
+        // Router removed 2026-07-27, for two converging reasons. It failed
+        // silently on elliptical follow-ups ("try this timestamp instead"):
+        // keyword matching found nothing, no tool was attached, and the model
+        // fabricated claims about data it never retrieved -- observed across
+        // three consecutive turns. And after consolidating the three MCP
+        // servers into one, there is only a single connection to route to
+        // anyway. agent-core's ToolgroupRouter classes are left in place as
+        // unused library capability, should a constrained-model deployment
+        // ever need per-toolgroup context control again.
+        Map<String, McpSyncClient> clients = registry.all();
         String modelKey = (request.modelKey() != null) ? request.modelKey() : "server1";
         String ollamaModelName = ollamaModelNamesByKey.get(modelKey);
 
         investigation.addTurn(new Investigation.Turn("user", request.message(), null, false, Instant.now()));
 
-        investigation.activity.publish(toolgroup.isPresent()
-                ? AgentActivityEvent.succeeded(investigation.id, toolgroup.get(), "routing", "Routed to '" + toolgroup.get() + "'")
-                : AgentActivityEvent.succeeded(investigation.id, "none", "routing", "No specific toolgroup matched"));
-
-        if (toolgroup.isPresent() && client.isEmpty()) {
-            log.warn("Routed to toolgroup '{}' but it is not currently registered", toolgroup.get());
-            return respond(investigation, toolgroup.get(), "that capability is not currently connected", true);
-        }
+        investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id,
+                String.join(",", clients.keySet()), "tools",
+                clients.isEmpty() ? "No MCP server connected" : "All tools available"));
 
         boolean useOllama = ollamaModelName != null;
         if (!"server1".equals(modelKey) && !useOllama) {
             log.warn("Requested unknown or unavailable model key '{}'", modelKey);
-            return respond(investigation, toolgroup.orElse(null), "the requested model ('" + modelKey + "') is not currently available", true);
+            return respond(investigation, null, "the requested model ('" + modelKey + "') is not currently available", true);
         }
 
-        investigation.activity.publish(AgentActivityEvent.started(investigation.id, toolgroup.orElse("none"), "llm_call"));
+        investigation.activity.publish(AgentActivityEvent.started(investigation.id, "model", "llm_call"));
 
         try {
             ChatClient.ChatClientRequestSpec promptSpec;
@@ -169,8 +175,15 @@ public class ChatController {
                         .system(SYSTEM_PROMPT)
                         .user(request.message());
             }
-            if (client.isPresent()) {
-                promptSpec = promptSpec.tools(new SyncMcpToolCallbackProvider(client.get()));
+            if (!clients.isEmpty()) {
+                // One provider per connected MCP client, attached together.
+                // Varargs form rather than a possible List-accepting
+                // constructor, to stay near the single-provider call shape
+                // already known to compile against this Spring AI version.
+                var providers = clients.values().stream()
+                        .map(SyncMcpToolCallbackProvider::new)
+                        .toArray(org.springframework.ai.tool.ToolCallbackProvider[]::new);
+                promptSpec = promptSpec.tools(providers);
             }
 
             // Fallback for reasoning models that can put their real answer in a
@@ -191,17 +204,17 @@ public class ChatController {
                 }
             }
 
-            investigation.addTurn(new Investigation.Turn("agent", answer, toolgroup.orElse("none"), false, Instant.now()));
+            investigation.addTurn(new Investigation.Turn("agent", answer, "all", false, Instant.now()));
             investigation.activity.publish(AgentActivityEvent.succeeded(
-                    investigation.id, toolgroup.orElse("none"), "llm_call", "Answer ready"));
+                    investigation.id, "model", "llm_call", "Answer ready"));
 
-            return Map.of("answer", answer, "toolgroupUsed", toolgroup.orElse("none"),
+            return Map.of("answer", answer, "toolgroupUsed", "all",
                     "investigationId", investigation.id, "modelUsed", modelKey);
         } catch (Exception e) {
-            log.error("Chat request failed (toolgroup={}, model={}): {}", toolgroup.orElse("none"), modelKey, e.getMessage(), e);
+            log.error("Chat request failed (model={}): {}", modelKey, e.getMessage(), e);
             investigation.activity.publish(AgentActivityEvent.failed(
-                    investigation.id, toolgroup.orElse("none"), "llm_call", e.getMessage()));
-            return respond(investigation, toolgroup.orElse(null), "something went wrong processing that request", true);
+                    investigation.id, "model", "llm_call", e.getMessage()));
+            return respond(investigation, null, "something went wrong processing that request", true);
         }
     }
 

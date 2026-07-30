@@ -20,7 +20,7 @@ server:
   port: 8081
 
 vantage:
-  log-mcp-server:
+  vantage-mcp-server:
     upload-url: http://192.168.1.108:8091/api/logs/upload    # Server3->Server2
                                                                  # server-to-server hop,
                                                                  # confirmed working via
@@ -39,9 +39,7 @@ vantage:
         model-name: qwen3:8b
   mcp:
     toolgroups:
-      logs:
+      # Single consolidated MCP server (was three: logs/code/jira_rag on
+      # 8091/8092/8093). All tools now come from one connection.
+      vantage:
         url: http://192.168.1.108:8091/mcp
-      code:
-        url: http://192.168.1.108:8092/mcp
-      jira_rag:
-        url: http://192.168.1.108:8093/mcp

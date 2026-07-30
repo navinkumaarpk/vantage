@@ -298,8 +298,8 @@
       jiraTicketInput = document.getElementById("jiraTicketInput"), uploadResult = document.getElementById("uploadResult"),
       uploadSubmit = document.getElementById("uploadSubmit"),
       busy = false, currentInvestigationId = null, eventSource = null, selectedFile = null;
-  var EXPECTED = ["logs", "code", "jira_rag"];
-  var LABEL = { logs: "logs", code: "code", jira_rag: "jira" };
+  var EXPECTED = ["vantage"];
+  var LABEL = { vantage: "tools" };
   var MODEL_LABELS = {};
   // Bug found and fixed (2026-07-27): this used to hardcode log-mcp-server's
   // address (Server2) and call it directly from the browser, cross-origin.
@@ -449,6 +449,7 @@
     node.innerHTML = ""; if (degraded) node.classList.add("degraded");
     var head = el("div", "agent-head"); head.appendChild(el("div", "agent-label", "AGENT"));
     if (degraded) head.appendChild(el("div", "badge warn", "degraded"));
+    else if (toolgroup === "all") head.appendChild(el("div", "badge tool", "all tools"));
     else if (toolgroup && toolgroup !== "none") head.appendChild(el("div", "badge tool", LABEL[toolgroup] || toolgroup));
     else head.appendChild(el("div", "badge", "no tool used"));
     if (modelKey) head.appendChild(el("div", "badge", MODEL_LABELS[modelKey] || modelKey));
