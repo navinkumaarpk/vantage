@@ -20,6 +20,10 @@ server:
   port: 8081
 
 vantage:
+  cursor-agent:
+    # Python sidecar running the Cursor SDK (vantage-cursor-agent/).
+    # Blank hides the Cursor option from the model picker entirely.
+    url: http://localhost:8094
   vantage-mcp-server:
     upload-url: http://192.168.1.108:8091/api/logs/upload    # Server3->Server2
                                                                  # server-to-server hop,

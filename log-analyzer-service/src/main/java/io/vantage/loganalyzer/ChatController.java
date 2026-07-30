@@ -49,18 +49,27 @@ public class ChatController {
 
     private final McpClientRegistry registry;
     private final InvestigationStore investigations;
+    private final CursorAgentClient cursorAgent;
 
     public ChatController(OpenAiChatModel openAiChatModel,
                            ObjectProvider<OllamaChatModel> ollamaProvider,
                            ChatMemory chatMemory,
                            VantageOllamaProperties ollamaProperties,
-                           McpClientRegistry registry, InvestigationStore investigations) {
+                           McpClientRegistry registry, InvestigationStore investigations,
+                           CursorAgentClient cursorAgent) {
         this.memoryAdvisor = MessageChatMemoryAdvisor.builder(chatMemory).build();
         this.registry = registry;
         this.investigations = investigations;
+        this.cursorAgent = cursorAgent;
 
         this.openAiClient = ChatClient.builder(openAiChatModel).build();
         modelOptions.add(new ModelOption("server1", "Qwen2.5-7B (Server1, CPU)", "openai", null));
+        if (cursorAgent.isConfigured()) {
+            // Frontier model via the Cursor subscription, through the Python
+            // sidecar. Additive: listed alongside the local options so they can
+            // be A/B compared rather than replaced.
+            modelOptions.add(new ModelOption("cursor", "Cursor (Composer 2.5)", "cursor", null));
+        }
 
         OllamaChatModel om = ollamaProvider.getIfAvailable();
         if (om != null && !ollamaProperties.getModels().isEmpty()) {
@@ -128,6 +137,45 @@ public class ChatController {
                 String.join(",", clients.keySet()), "tools",
                 clients.isEmpty() ? "No MCP server connected" : "All tools available"));
 
+        // Cursor path. The sidecar's Agent owns conversation state, so the
+        // Spring AI ChatMemory advisor is deliberately not used here.
+        if ("cursor".equals(modelKey)) {
+            if (!cursorAgent.isConfigured()) {
+                return respond(investigation, null, "the Cursor agent sidecar is not configured", true);
+            }
+            investigation.activity.publish(AgentActivityEvent.started(investigation.id, "cursor", "agent_run"));
+            CursorAgentClient.Result result = cursorAgent.chat(request.message(), investigation.id);
+
+            if (result.error() != null || result.text() == null || result.text().isBlank()) {
+                log.error("Cursor agent failed: {}", result.error());
+                investigation.activity.publish(AgentActivityEvent.failed(investigation.id, "cursor", "agent_run",
+                        result.error() == null ? "empty response" : result.error()));
+                return respond(investigation, null, "the Cursor agent could not complete that request", true);
+            }
+
+            // Real per-tool-call events. The local-model path cannot produce
+            // these because Spring AI does not expose its internal tool loop.
+            for (CursorAgentClient.ToolCall call : result.toolCalls()) {
+                investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id, "cursor",
+                        "tool_call", call.name() + " (" + call.status() + ")"));
+            }
+            investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id, "cursor",
+                    "agent_run", "Answer ready"));
+
+            investigation.addTurn(new Investigation.Turn("agent", result.text(), "cursor", false, Instant.now()));
+            var out = new java.util.LinkedHashMap<String, Object>();
+            out.put("answer", result.text());
+            out.put("toolgroupUsed", "cursor");
+            out.put("investigationId", investigation.id);
+            out.put("modelUsed", modelKey);
+            if (result.totalTokens() != null) {
+                out.put("totalTokens", result.totalTokens());
+            }
+            return out;
+        }
+
+        // Unknown-model guard sits after the cursor branch on purpose: "cursor"
+        // is neither server1 nor an Ollama key, so checking earlier rejected it.
         boolean useOllama = ollamaModelName != null;
         if (!"server1".equals(modelKey) && !useOllama) {
             log.warn("Requested unknown or unavailable model key '{}'", modelKey);

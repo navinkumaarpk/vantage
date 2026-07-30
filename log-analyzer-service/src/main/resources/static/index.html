@@ -299,7 +299,7 @@
       uploadSubmit = document.getElementById("uploadSubmit"),
       busy = false, currentInvestigationId = null, eventSource = null, selectedFile = null;
   var EXPECTED = ["vantage"];
-  var LABEL = { vantage: "tools" };
+  var LABEL = { vantage: "tools", cursor: "cursor agent" };
   var MODEL_LABELS = {};
   // Bug found and fixed (2026-07-27): this used to hardcode log-mcp-server's
   // address (Server2) and call it directly from the browser, cross-origin.
@@ -445,7 +445,7 @@
     paint(); var timer = setInterval(paint, 100); scrollDown();
     return { done: function () { clearInterval(timer); return ((Date.now() - start) / 1000).toFixed(1); }, node: wrap };
   }
-  function fillAgent(node, text, toolgroup, seconds, degraded, modelKey) {
+  function fillAgent(node, text, toolgroup, seconds, degraded, modelKey, tokens) {
     node.innerHTML = ""; if (degraded) node.classList.add("degraded");
     var head = el("div", "agent-head"); head.appendChild(el("div", "agent-label", "AGENT"));
     if (degraded) head.appendChild(el("div", "badge warn", "degraded"));
@@ -454,6 +454,7 @@
     else head.appendChild(el("div", "badge", "no tool used"));
     if (modelKey) head.appendChild(el("div", "badge", MODEL_LABELS[modelKey] || modelKey));
     if (seconds) head.appendChild(el("div", "badge time", seconds + "s"));
+    if (tokens) head.appendChild(el("div", "badge time", tokens + " tok"));
     var body = el("div", "agent-body");
     body.innerHTML = DOMPurify.sanitize(marked.parse(text));
     node.appendChild(head); node.appendChild(body); scrollDown();
@@ -481,7 +482,7 @@
       .then(function (r) { if (!r.ok) throw new Error("Request failed (" + r.status + ")"); return r.json(); })
       .then(function (d) {
         clearTimeout(timeoutId);
-        var secs = pending.done(); fillAgent(pending.node, d.answer, d.toolgroupUsed, secs, d.degraded === true, d.modelUsed);
+        var secs = pending.done(); fillAgent(pending.node, d.answer, d.toolgroupUsed, secs, d.degraded === true, d.modelUsed, d.totalTokens);
         if (d.investigationId && d.investigationId !== currentInvestigationId) currentInvestigationId = d.investigationId;
         if (isFirstMessage) connectActivity(currentInvestigationId);
         loadInvestigations();
