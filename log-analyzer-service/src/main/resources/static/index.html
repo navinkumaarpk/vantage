@@ -471,7 +471,11 @@
     // (observed up to ~150s for complex prompts) while still bounding how
     // long a truly broken request can leave the user hanging.
     var controller = new AbortController();
-    var timeoutMs = 180000;
+    // Cursor's path is a remote multi-tool-call agent, not local inference --
+    // the simplest possible probe query burned 45,871 tokens and Java's own
+    // client hit a 38s read timeout on a real investigation. 180s was tuned
+    // against local models only; give Cursor real room.
+    var timeoutMs = (modelSelect.value === "cursor") ? 300000 : 180000;
     var timeoutId = setTimeout(function () { controller.abort(); }, timeoutMs);
 
     fetch("/api/chat", {

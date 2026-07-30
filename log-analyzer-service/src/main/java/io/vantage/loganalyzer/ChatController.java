@@ -231,7 +231,7 @@ public class ChatController {
                 var providers = clients.values().stream()
                         .map(SyncMcpToolCallbackProvider::new)
                         .toArray(org.springframework.ai.tool.ToolCallbackProvider[]::new);
-                promptSpec = promptSpec.tools(providers);
+                promptSpec = promptSpec.tools((Object[]) providers);
             }
 
             // Fallback for reasoning models that can put their real answer in a

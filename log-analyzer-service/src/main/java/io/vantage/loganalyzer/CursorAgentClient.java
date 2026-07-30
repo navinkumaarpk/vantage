@@ -30,7 +30,25 @@ public class CursorAgentClient {
 
     private static final Logger log = LoggerFactory.getLogger(CursorAgentClient.class);
 
-    private final RestClient restClient = RestClient.create();
+    // Bug found and fixed (2026-07-30): RestClient.create() with no explicit
+    // timeout hit ReadTimeoutException at 38s on a real multi-tool-call
+    // investigation -- the simplest possible probe query alone burned 45,871
+    // tokens, so a real "what went wrong with X" run (multiple round trips to
+    // a remote LLM provider, not local inference) was never going to fit in
+    // 38s. First fix attempt used ClientHttpRequestFactoryBuilder /
+    // ClientHttpRequestFactorySettings, which do not exist on this classpath
+    // -- falling back to SimpleClientHttpRequestFactory, a much older and
+    // more conservatively-maintained API, less likely to have moved.
+    private final RestClient restClient;
+
+    {
+        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(10_000);
+        factory.setReadTimeout(300_000); // 5 minutes -- generous on purpose,
+                                          // this path is categorically slower
+                                          // than the local-model paths.
+        restClient = RestClient.builder().requestFactory(factory).build();
+    }
 
     @Value("${vantage.cursor-agent.url:}")
     private String sidecarUrl;
