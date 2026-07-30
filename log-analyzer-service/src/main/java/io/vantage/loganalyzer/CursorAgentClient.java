@@ -1,103 +1,115 @@
 package io.vantage.loganalyzer;
 
-import java.util.ArrayList;
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestClient;
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Flux;
 
 /**
- * Calls the Python Cursor SDK sidecar (see vantage-cursor-agent/).
+ * Calls the Python Cursor SDK sidecar (see vantage-cursor-agent/) over SSE.
  *
- * <p>Same proxy shape as LogUploadProxyController: the browser only talks to
- * this service, and this service makes the server-to-server hop.
+ * <p><strong>Rewritten 2026-07-30</strong> from a synchronous drain-then-respond
+ * call (RestClient, one JSON blob at the end) to real streaming (WebClient,
+ * bodyToFlux(ServerSentEvent.class)). The old design directly caused a 38s
+ * ReadTimeoutException on a real multi-tool-call investigation -- holding one
+ * synchronous connection open across Server3-&gt;Python-&gt;Cursor's
+ * infra-&gt;multiple tool round trips has no good fixed timeout -- and gave
+ * zero live visibility, when the actual ask was to see tool calls appear as
+ * they happen, the way Claude's own interface shows them.
  *
- * <p>Non-streaming by design for now. The sidecar drains the run and returns
- * the answer plus the tool calls the agent actually made. That delivers the
- * thing the local-model path cannot -- real per-tool-call visibility, which
- * Spring AI never surfaces from its internal tool loop -- without rewriting
- * /api/chat and the frontend for streaming. Tool events therefore arrive at
- * end-of-run rather than live.
+ * <p>bodyToFlux(ServerSentEvent.class) is a standard, well-documented Spring
+ * WebClient pattern, not new API risk -- it is the same transport our own
+ * activity feed (InvestigationController) already uses successfully.
+ *
+ * <p>ChatController still returns one final answer to the browser per request
+ * (bridging this Flux to a blocking call with .block(Duration)), but now
+ * publishes an activity event for every tool call AS it arrives during that
+ * wait, rather than only once at the very end. Full inline-in-chat-transcript
+ * rendering (tool blocks appearing within the message stream itself, matching
+ * Claude's own UI) is a further frontend redesign, deliberately not attempted
+ * in this pass.
  */
 @Component
 public class CursorAgentClient {
 
     private static final Logger log = LoggerFactory.getLogger(CursorAgentClient.class);
 
-    // Bug found and fixed (2026-07-30): RestClient.create() with no explicit
-    // timeout hit ReadTimeoutException at 38s on a real multi-tool-call
-    // investigation -- the simplest possible probe query alone burned 45,871
-    // tokens, so a real "what went wrong with X" run (multiple round trips to
-    // a remote LLM provider, not local inference) was never going to fit in
-    // 38s. First fix attempt used ClientHttpRequestFactoryBuilder /
-    // ClientHttpRequestFactorySettings, which do not exist on this classpath
-    // -- falling back to SimpleClientHttpRequestFactory, a much older and
-    // more conservatively-maintained API, less likely to have moved.
-    private final RestClient restClient;
-
-    {
-        var factory = new org.springframework.http.client.SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(10_000);
-        factory.setReadTimeout(300_000); // 5 minutes -- generous on purpose,
-                                          // this path is categorically slower
-                                          // than the local-model paths.
-        restClient = RestClient.builder().requestFactory(factory).build();
-    }
+    private final WebClient webClient = WebClient.builder().build();
 
     @Value("${vantage.cursor-agent.url:}")
     private String sidecarUrl;
 
-    /** One tool invocation as reported by the SDK stream. */
-    public record ToolCall(String name, String status) {}
-
-    public record Result(String text, List<ToolCall> toolCalls, Integer totalTokens, String error) {}
+    /** One SSE frame from the sidecar. type is one of tool_call/text_delta/done/error. */
+    public record StreamEvent(
+            String type,
+            String toolName,
+            String toolStatus,
+            String textDelta,
+            String finalText,
+            String runStatus,
+            Integer totalTokens,
+            String error
+    ) {}
 
     public boolean isConfigured() {
         return sidecarUrl != null && !sidecarUrl.isBlank();
     }
 
+    /**
+     * Streams the run. Callers should subscribe with a side effect (e.g.
+     * .doOnNext(...) publishing tool_call events into an activity feed) before
+     * blocking for the terminal done/error event, since consuming the Flux is
+     * what drives that side effect -- collecting to a List and inspecting it
+     * afterward, as ChatController does, satisfies this naturally.
+     */
     @SuppressWarnings("unchecked")
-    public Result chat(String message, String investigationId) {
+    public Flux<StreamEvent> chatStream(String message, String investigationId) {
+        return webClient.post()
+                .uri(sidecarUrl + "/agent/chat")
+                .contentType(MediaType.APPLICATION_JSON)
+                .accept(MediaType.TEXT_EVENT_STREAM)
+                .bodyValue(Map.of("message", message, "investigationId", investigationId))
+                .retrieve()
+                .bodyToFlux(ServerSentEvent.class)
+                .map(sse -> parse((String) sse.data()))
+                .onErrorResume(ex -> {
+                    log.error("Cursor sidecar stream failed", ex);
+                    return Flux.just(new StreamEvent("error", null, null, null, null, null, null,
+                            ex.getClass().getSimpleName() + ": " + ex.getMessage()));
+                });
+    }
+
+    @SuppressWarnings("unchecked")
+    private StreamEvent parse(String json) {
         try {
-            Map<String, Object> body = restClient.post()
-                    .uri(sidecarUrl + "/agent/chat")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of("message", message, "investigationId", investigationId))
-                    .retrieve()
-                    .body(Map.class);
-
-            if (body == null) {
-                return new Result("", List.of(), null, "Empty response from Cursor sidecar");
-            }
-
-            List<ToolCall> tools = new ArrayList<>();
-            Object raw = body.get("toolCalls");
-            if (raw instanceof List<?> list) {
-                for (Object item : list) {
-                    if (item instanceof Map<?, ?> m) {
-                        tools.add(new ToolCall(
-                                Objects.toString(m.get("name"), "?"),
-                                Objects.toString(m.get("status"), "?")));
-                    }
-                }
-            }
-
-            Object err = body.get("error");
-            Object tokens = body.get("totalTokens");
-            return new Result(
-                    String.valueOf(body.getOrDefault("text", "")),
-                    tools,
+            Map<String, Object> m = new com.fasterxml.jackson.databind.ObjectMapper().readValue(json, Map.class);
+            String type = String.valueOf(m.get("event"));
+            Object tokens = m.get("totalTokens");
+            return new StreamEvent(
+                    type,
+                    (String) m.get("name"),
+                    (String) m.get("status"),
+                    (String) m.get("text"),
+                    "done".equals(type) ? (String) m.get("text") : null,
+                    (String) m.get("status"),
                     tokens instanceof Number n ? n.intValue() : null,
-                    err == null ? null : String.valueOf(err));
+                    (String) m.get("error"));
         } catch (Exception e) {
-            log.error("Cursor sidecar call failed", e);
-            return new Result("", List.of(), null, e.getClass().getSimpleName() + ": " + e.getMessage());
+            log.error("Failed to parse SSE frame from Cursor sidecar: {}", json, e);
+            return new StreamEvent("error", null, null, null, null, null, null,
+                    "Malformed event from sidecar: " + e.getMessage());
         }
+    }
+
+    /** Blocking convenience for a caller that only wants the terminal result. */
+    public List<StreamEvent> collect(String message, String investigationId, Duration timeout) {
+        return chatStream(message, investigationId).collectList().block(timeout);
     }
 }

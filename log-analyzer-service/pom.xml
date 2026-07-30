@@ -22,6 +22,18 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
+        <!--
+            Plain spring-webflux, deliberately NOT spring-boot-starter-webflux.
+            The starter auto-configures a reactive server, replacing/competing
+            with the servlet/Tomcat stack this whole app runs on. This dependency
+            exists only to get WebClient for consuming the Cursor sidecar's SSE
+            stream (io.vantage.loganalyzer.CursorAgentClient) -- a reactive HTTP
+            CLIENT, with no change to how this app serves requests.
+        -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-webflux</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.springframework.ai</groupId>
             <artifactId>spring-ai-starter-model-openai</artifactId>

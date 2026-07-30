@@ -87,8 +87,11 @@ public class CodeSearchTools {
     }
 
     @McpTool(name = "get_source_context", description = "Read the source code surrounding a specific file and "
-            + "line number. file must be the OpenGrok-relative path exactly as returned by the other tools here "
-            + "(e.g. /oltmgr/develop/dcijavagit/dml/src/com/example/Foo.java), not an absolute filesystem path.")
+            + "line number. file MUST be the full OpenGrok-relative path exactly as returned by find_definition, "
+            + "search_by_symptom, or find_callers (e.g. /oltmgr/develop/dcijavagit/dml/src/com/example/Foo.java) "
+            + "-- never a bare filename like 'Foo.java' and never a path you construct yourself by guessing at a "
+            + "package. If you only have a bare class name (for example from a log entry's source_file field), "
+            + "call find_definition or search_by_symptom with that class name FIRST to discover its real path.")
     public String getSourceContext(
             @McpToolParam(description = "OpenGrok-relative file path, as returned by other tools", required = true) String file,
             @McpToolParam(description = "1-indexed line number to center the context window on", required = true) int line) {
@@ -98,6 +101,23 @@ public class CodeSearchTools {
         }
         if (line < 1) {
             throw new IllegalArgumentException("get_source_context: 'line' must be a positive integer, got " + line);
+        }
+        // Bug found and fixed (2026-07-30): observed a real Cursor agent run
+        // pass bare filenames ("PopulatorService.java") and a guessed-but-wrong
+        // full path, all failing with an opaque NoSuchFileException the model
+        // had no way to act on. Log entries only ever carry a bare class name
+        // in their source_file field (that's all the OltMgr log format itself
+        // provides), which is not enough to locate a file -- the same class
+        // name can exist under multiple packages. Reject early with guidance
+        // toward the actual fix (resolve via search first) rather than let a
+        // filesystem exception surface with no path forward.
+        if (!file.contains("/")) {
+            throw new IllegalArgumentException(
+                    "get_source_context: '" + file + "' looks like a bare filename, not a full path. "
+                            + "A log entry's source_file field only ever has the bare class name -- that is not "
+                            + "enough to locate it on disk, since the same class name can exist under multiple "
+                            + "packages. Call find_definition or search_by_symptom with the class name first to "
+                            + "discover its real OpenGrok path, then pass that full path here.");
         }
 
         try {

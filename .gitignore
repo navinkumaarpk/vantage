@@ -6,3 +6,5 @@ out/
 log-analyzer-service/target/
 agent-core/target/
 log-mcp-server/target/
+vantage-cursor-agent/.venv/
+vantage-cursor-agent/__pycache__/

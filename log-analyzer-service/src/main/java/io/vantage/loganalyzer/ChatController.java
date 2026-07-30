@@ -144,32 +144,55 @@ public class ChatController {
                 return respond(investigation, null, "the Cursor agent sidecar is not configured", true);
             }
             investigation.activity.publish(AgentActivityEvent.started(investigation.id, "cursor", "agent_run"));
-            CursorAgentClient.Result result = cursorAgent.chat(request.message(), investigation.id);
 
-            if (result.error() != null || result.text() == null || result.text().isBlank()) {
-                log.error("Cursor agent failed: {}", result.error());
+            // Consume the SSE stream, publishing a real activity event for
+            // every tool_call frame AS it arrives -- not once at the end.
+            // .doOnNext runs during collectList()'s subscription, so these
+            // publishes happen live while this request is still blocking,
+            // and the browser's already-open activity SSE connection shows
+            // them immediately even though /api/chat itself hasn't returned.
+            List<CursorAgentClient.StreamEvent> events;
+            try {
+                events = cursorAgent.chatStream(request.message(), investigation.id)
+                        .doOnNext(evt -> {
+                            if ("tool_call".equals(evt.type())) {
+                                investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id,
+                                        "cursor", "tool_call", evt.toolName() + " (" + evt.toolStatus() + ")"));
+                            }
+                        })
+                        .collectList()
+                        .block(java.time.Duration.ofMinutes(5));
+            } catch (Exception e) {
+                log.error("Cursor agent stream failed", e);
                 investigation.activity.publish(AgentActivityEvent.failed(investigation.id, "cursor", "agent_run",
-                        result.error() == null ? "empty response" : result.error()));
+                        e.getMessage()));
                 return respond(investigation, null, "the Cursor agent could not complete that request", true);
             }
 
-            // Real per-tool-call events. The local-model path cannot produce
-            // these because Spring AI does not expose its internal tool loop.
-            for (CursorAgentClient.ToolCall call : result.toolCalls()) {
-                investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id, "cursor",
-                        "tool_call", call.name() + " (" + call.status() + ")"));
+            CursorAgentClient.StreamEvent terminal = (events == null) ? null : events.stream()
+                    .filter(e -> "done".equals(e.type()) || "error".equals(e.type()))
+                    .reduce((first, second) -> second) // last one wins
+                    .orElse(null);
+
+            if (terminal == null || "error".equals(terminal.type())
+                    || terminal.finalText() == null || terminal.finalText().isBlank()) {
+                String reason = (terminal != null && terminal.error() != null) ? terminal.error() : "empty response";
+                log.error("Cursor agent failed: {}", reason);
+                investigation.activity.publish(AgentActivityEvent.failed(investigation.id, "cursor", "agent_run", reason));
+                return respond(investigation, null, "the Cursor agent could not complete that request", true);
             }
+
             investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id, "cursor",
                     "agent_run", "Answer ready"));
+            investigation.addTurn(new Investigation.Turn("agent", terminal.finalText(), "cursor", false, Instant.now()));
 
-            investigation.addTurn(new Investigation.Turn("agent", result.text(), "cursor", false, Instant.now()));
             var out = new java.util.LinkedHashMap<String, Object>();
-            out.put("answer", result.text());
+            out.put("answer", terminal.finalText());
             out.put("toolgroupUsed", "cursor");
             out.put("investigationId", investigation.id);
             out.put("modelUsed", modelKey);
-            if (result.totalTokens() != null) {
-                out.put("totalTokens", result.totalTokens());
+            if (terminal.totalTokens() != null) {
+                out.put("totalTokens", terminal.totalTokens());
             }
             return out;
         }

@@ -1,37 +1,47 @@
 """
 Vantage <-> Cursor SDK sidecar.
 
-Exposes a Cursor agent over HTTP so log-analyzer-service (Java) can offer it as
-an additional model option. One Agent per investigation: the Agent holds
-conversation state, which is what gives this path multi-turn memory, so Spring
-AI's ChatMemory advisor is deliberately unused here.
+Exposes a Cursor agent over SSE so log-analyzer-service (Java) gets real live
+progress instead of one response after the whole run finishes.
 
-Written against the documented Python SDK surface. Notes on choices that are
-not obvious from the quick start:
+=============================================================================
+Changed 2026-07-30: was drain-then-respond (call run.messages() to exhaustion,
+throw away the incremental structure, return one JSON blob at the end). That
+directly caused two separate real problems: a 38s ReadTimeoutException on
+Java's client for a real multi-tool-call investigation (holding one
+synchronous connection open across Server3->Python->Cursor's infra->multiple
+tool round trips has no good timeout value), and no live visibility at all --
+confirmed by a user expecting to see "calling X tool" appear as it happens,
+the way Claude's own interface shows it, and instead getting nothing until
+the whole run either finished or timed out.
 
-* mcp_servers uses HttpMcpServerConfig(type="http"). "http" is the documented
-  value; there is no "streamable-http" here even though that is what the MCP
-  server itself speaks.
-* setting_sources is intentionally NOT set. Per the docs, "Without
-  local.setting_sources, only inline servers are loaded" -- so the IDE's
-  ~/.cursor/mcp.json is ignored and this sidecar is self-contained. To pick up
-  the IDE config instead you would pass setting_sources=["user"].
-* A run stream is consumable once: run.messages(), run.events() and
-  run.iter_text() all advance the same stream. So we drain messages() to
-  collect tool calls and text, then call run.wait() for the terminal
-  RunResult rather than run.text(), which would race the drained stream.
-* Local runtime means the agent harness runs here, so MCP calls originate on
-  this host and can reach vantage-mcp-server on the private network. It does
-  NOT mean local inference -- the model runs on Cursor's servers, no GPU here.
-* Local agents never raise AgentBusyError (that is cloud-only), so concurrent
-  sends degrade rather than 409. local={"force": True} clears a stuck run.
+Now emits real SSE as run.messages() yields them. Java (WebClient,
+bodyToFlux(ServerSentEvent.class) -- a standard, well-documented Spring
+pattern) publishes each event into the investigation's activity feed as it
+arrives, live, rather than at the end. This also removes the need for one
+long blocking request/response pair on the Python<->Java hop; the eventual
+POST /api/chat to the browser still returns once, at the end, but the
+SEPARATE activity SSE connection the browser already holds now shows real
+progress DURING that wait instead of nothing.
+
+Message field shapes below (message.type, SDKToolUseMessage.name/status/
+call_id, SDKAssistantMessage.message.content with TextBlock) are confirmed
+directly from the Python SDK reference docs, not guessed.
+
+Known follow-up, deliberately not built here: inline tool-call blocks WITHIN
+the chat transcript itself (matching Claude's own UI). This gives real live
+sidebar/activity-feed updates; rendering the same events inline in the
+message stream is a separate frontend redesign.
+=============================================================================
 """
 
+import json
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 try:
@@ -56,9 +66,6 @@ log = logging.getLogger("vantage-cursor-agent")
 CURSOR_API_KEY = os.environ.get("CURSOR_API_KEY", "")
 VANTAGE_MCP_URL = os.environ.get("VANTAGE_MCP_URL", "http://192.168.1.108:8091/mcp")
 CURSOR_MODEL = os.environ.get("CURSOR_MODEL", "composer-2.5")
-# The local runtime needs a workspace. We are not editing code, but the bridge
-# is workspace-scoped, so keep it stable across restarts so local persistence
-# and Agent.resume() resolve the same agents.
 WORKSPACE = os.environ.get("AGENT_CWD", os.getcwd())
 
 app = FastAPI(title="vantage-cursor-agent")
@@ -80,9 +87,12 @@ get_log_context to see the chronological sequence leading to the failure. This
 matters because one device often appears under several different identifiers
 across log lines, so the entries explaining WHY something failed frequently do
 not mention the identifier you searched for -- but they do share the worker
-thread. On an unfamiliar log set, call summarize_logs first: in Java logs every
-statement has a unique source file:line, so grouping by source_file is exact
-template detection and collapses thousands of lines into a handful of call sites.
+thread. On an unfamiliar log set, call summarize_logs first.
+
+Never guess a source file's full path. A log entry's source_file field is only
+ever a bare class name, which is not enough to locate the file -- call
+find_definition or search_by_symptom with the class name first to discover its
+real path, then pass that to get_source_context.
 
 If a tool call fails, say plainly that the capability is unavailable. Do not ask
 the user for more detail -- more detail cannot fix a broken connection.
@@ -94,21 +104,7 @@ class ChatRequest(BaseModel):
     investigationId: str
 
 
-class ChatResponse(BaseModel):
-    text: str
-    toolCalls: List[Dict[str, Any]] = []
-    totalTokens: Optional[int] = None
-    status: Optional[str] = None
-    error: Optional[str] = None
-    requestId: Optional[str] = None
-
-
 def _get_client() -> Any:
-    """
-    One long-lived bridge for the process. The docs call this out specifically:
-    when the bridge runs as a long-lived sidecar, give it the same workspace as
-    the agents so local list/get/resume resolve correctly.
-    """
     global _client
     if _client is None:
         _client = CursorClient.launch_bridge(workspace=WORKSPACE)
@@ -131,44 +127,72 @@ def _build_agent() -> Any:
     )
 
 
-def _drain(run: Any) -> ChatResponse:
-    """
-    Drain the run stream once, collecting tool calls and assistant text, then
-    read the terminal result via wait().
+def _sse(payload: Dict[str, Any]) -> str:
+    return f"data: {json.dumps(payload)}\n\n"
 
-    SDKToolUseMessage is emitted twice per call -- status="running" with args,
-    then status="completed"/"error" with result -- so both are recorded. That is
-    useful rather than noisy: it gives the activity feed a real start/finish
-    sequence per tool instead of a single opaque event.
-    """
-    tool_calls: List[Dict[str, Any]] = []
-    text_parts: List[str] = []
 
-    for message in run.messages():
-        kind = getattr(message, "type", None)
-        if kind == "assistant":
-            for block in getattr(message.message, "content", []) or []:
-                if getattr(block, "type", None) == "text":
-                    text_parts.append(getattr(block, "text", "") or "")
-        elif kind == "tool_call":
-            tool_calls.append(
-                {
+def _event_stream(req: ChatRequest):
+    """
+    Generator yielding real SSE frames as the run progresses. Kept as a plain
+    generator (not async) to match the sync SDK surface used throughout this
+    sidecar; FastAPI runs sync generators for StreamingResponse in a worker
+    thread, which is fine for one agent run at a time.
+    """
+    try:
+        agent = _agents.get(req.investigationId)
+        if agent is None:
+            agent = _build_agent()
+            _agents[req.investigationId] = agent
+            log.info(
+                "Created agent %s for investigation %s",
+                getattr(agent, "agent_id", "?"),
+                req.investigationId,
+            )
+
+        if req.investigationId in _greeted:
+            prompt = req.message
+        else:
+            prompt = GUIDANCE + "\n\n---\n\n" + req.message
+            _greeted.add(req.investigationId)
+
+        run = agent.send(prompt)
+
+        for message in run.messages():
+            kind = getattr(message, "type", None)
+            if kind == "tool_call":
+                yield _sse({
+                    "event": "tool_call",
                     "name": getattr(message, "name", "?"),
                     "status": getattr(message, "status", "?"),
                     "callId": getattr(message, "call_id", None),
-                }
-            )
+                })
+            elif kind == "assistant":
+                for block in getattr(message.message, "content", []) or []:
+                    if getattr(block, "type", None) == "text":
+                        text = getattr(block, "text", "") or ""
+                        if text:
+                            yield _sse({"event": "text_delta", "text": text})
 
-    result = run.wait()
-    final_text = (getattr(result, "result", None) or "").strip() or "".join(text_parts).strip()
-    usage = getattr(result, "usage", None)
+        result = run.wait()
+        usage = getattr(result, "usage", None)
+        final_text = (getattr(result, "result", None) or "").strip()
+        yield _sse({
+            "event": "done",
+            "text": final_text,
+            "status": getattr(result, "status", None),
+            "totalTokens": getattr(usage, "total_tokens", None) if usage else None,
+        })
 
-    return ChatResponse(
-        text=final_text,
-        toolCalls=tool_calls,
-        totalTokens=getattr(usage, "total_tokens", None) if usage else None,
-        status=getattr(result, "status", None),
-    )
+    except CursorAgentError as exc:
+        log.exception("Cursor run failed for investigation %s", req.investigationId)
+        yield _sse({
+            "event": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+            "requestId": getattr(exc, "request_id", None),
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.exception("Unexpected sidecar failure for investigation %s", req.investigationId)
+        yield _sse({"event": "error", "error": f"{type(exc).__name__}: {exc}"})
 
 
 @app.get("/health")
@@ -187,11 +211,6 @@ def health() -> Dict[str, Any]:
 
 @app.get("/models")
 def models() -> Dict[str, Any]:
-    """
-    Discover what this account can actually use, rather than hard-coding a model
-    id. Useful because the catalog is account- and team-specific -- Cursor Router
-    only appears as auto-smart when it is enabled for the key's team.
-    """
     if Agent is None:
         return {"error": "cursor-sdk not installed", "models": []}
     try:
@@ -205,45 +224,19 @@ def models() -> Dict[str, Any]:
         return {"error": str(exc), "models": []}
 
 
-@app.post("/agent/chat", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+@app.post("/agent/chat")
+def chat(req: ChatRequest) -> StreamingResponse:
     if Agent is None:
-        return ChatResponse(text="", error=f"cursor-sdk not installed: {SDK_IMPORT_ERROR}")
-    if not CURSOR_API_KEY:
-        return ChatResponse(text="", error="CURSOR_API_KEY is not set on the sidecar")
-
-    try:
-        agent = _agents.get(req.investigationId)
-        if agent is None:
-            agent = _build_agent()
-            _agents[req.investigationId] = agent
-            log.info(
-                "Created agent %s for investigation %s",
-                getattr(agent, "agent_id", "?"),
-                req.investigationId,
-            )
-
-        # Prepend guidance to the FIRST message only. The Agent retains
-        # conversation state, so sending it as its own agent.send() would burn a
-        # whole extra run for no benefit.
-        if req.investigationId in _greeted:
-            prompt = req.message
-        else:
-            prompt = GUIDANCE + "\n\n---\n\n" + req.message
-            _greeted.add(req.investigationId)
-
-        return _drain(agent.send(prompt))
-
-    except CursorAgentError as exc:
-        log.exception("Cursor run failed for investigation %s", req.investigationId)
-        return ChatResponse(
-            text="",
-            error=f"{type(exc).__name__}: {exc}",
-            requestId=getattr(exc, "request_id", None),
+        return StreamingResponse(
+            iter([_sse({"event": "error", "error": f"cursor-sdk not installed: {SDK_IMPORT_ERROR}"})]),
+            media_type="text/event-stream",
         )
-    except Exception as exc:  # noqa: BLE001
-        log.exception("Unexpected sidecar failure for investigation %s", req.investigationId)
-        return ChatResponse(text="", error=f"{type(exc).__name__}: {exc}")
+    if not CURSOR_API_KEY:
+        return StreamingResponse(
+            iter([_sse({"event": "error", "error": "CURSOR_API_KEY is not set on the sidecar"})]),
+            media_type="text/event-stream",
+        )
+    return StreamingResponse(_event_stream(req), media_type="text/event-stream")
 
 
 @app.delete("/agent/{investigation_id}")
