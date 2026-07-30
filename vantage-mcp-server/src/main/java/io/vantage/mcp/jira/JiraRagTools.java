@@ -29,9 +29,12 @@ public class JiraRagTools {
 
     @McpTool(name = "find_similar_tickets", description = "Search past Jira tickets for anomalies semantically "
             + "similar to a newly observed log pattern or symptom. Returns candidate matches with similarity "
-            + "scores and confidence tiers — treat these as leads to verify, not confirmed duplicates.")
+            + "scores and confidence tiers — treat these as leads to verify, not confirmed duplicates. "
+            + "anomalySummary is REQUIRED: write a short 1-2 sentence description of what went wrong in your own "
+            + "words (e.g. 'ONU failed to populate because it did not exist in VOMCI when queried') -- do not "
+            + "call this tool without it.")
     public List<TicketMatch> findSimilarTickets(
-            @McpToolParam(description = "Description of the observed anomaly or symptom", required = true) String anomalySummary,
+            @McpToolParam(description = "Required. A short 1-2 sentence description of the observed anomaly or symptom, in your own words -- e.g. 'SSL handshake failure causing reconnect loop'", required = true) String anomalySummary,
             @McpToolParam(description = "Max number of results to return", required = false) Integer topK) {
 
         int limit = (topK == null) ? 5 : topK;

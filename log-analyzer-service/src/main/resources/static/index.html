@@ -456,7 +456,23 @@
     if (seconds) head.appendChild(el("div", "badge time", seconds + "s"));
     if (tokens) head.appendChild(el("div", "badge time", tokens + " tok"));
     var body = el("div", "agent-body");
-    body.innerHTML = DOMPurify.sanitize(marked.parse(text));
+    // Bug found and fixed (2026-07-30): fillAgent runs before connectActivity
+    // in send()'s success handler -- if markdown rendering throws here, the
+    // rest of that callback (including connectActivity) never runs at all,
+    // which matches a real report of the first message in a new investigation
+    // showing neither the answer nor live activity until a page reload. This
+    // was the first genuinely large, richly-formatted response (headers, a
+    // real table, arrows) to hit live rendering all session, so a markdown
+    // edge case is the leading suspect. Falling back to plain text keeps the
+    // answer visible and the rest of the callback running either way, and
+    // logs the real error so the next occurrence is diagnosable instead of
+    // silent.
+    try {
+        body.innerHTML = DOMPurify.sanitize(marked.parse(text));
+    } catch (err) {
+        console.error("Markdown render failed, falling back to plain text:", err);
+        body.textContent = text;
+    }
     node.appendChild(head); node.appendChild(body); scrollDown();
   }
   function send() {

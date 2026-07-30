@@ -69,6 +69,16 @@ public class CursorAgentClient {
      * what drives that side effect -- collecting to a List and inspecting it
      * afterward, as ChatController does, satisfies this naturally.
      */
+    /**
+     * Bug found and fixed (2026-07-30): assumed sse.data() would be the raw
+     * JSON string and manually re-parsed it with ObjectMapper -- confirmed
+     * wrong by a real ClassCastException (LinkedHashMap cannot be cast to
+     * String). WebClient's default Jackson codec already deserializes the
+     * SSE data field into a Map when bodyToFlux(ServerSentEvent.class) is
+     * used with the raw (non-generic) class, since there is no generic type
+     * token telling it to keep the payload as text. Fixed by accepting the
+     * already-parsed Map directly instead of re-parsing it.
+     */
     @SuppressWarnings("unchecked")
     public Flux<StreamEvent> chatStream(String message, String investigationId) {
         return webClient.post()
@@ -78,7 +88,7 @@ public class CursorAgentClient {
                 .bodyValue(Map.of("message", message, "investigationId", investigationId))
                 .retrieve()
                 .bodyToFlux(ServerSentEvent.class)
-                .map(sse -> parse((String) sse.data()))
+                .map(sse -> parse((Map<String, Object>) sse.data()))
                 .onErrorResume(ex -> {
                     log.error("Cursor sidecar stream failed", ex);
                     return Flux.just(new StreamEvent("error", null, null, null, null, null, null,
@@ -86,10 +96,8 @@ public class CursorAgentClient {
                 });
     }
 
-    @SuppressWarnings("unchecked")
-    private StreamEvent parse(String json) {
+    private StreamEvent parse(Map<String, Object> m) {
         try {
-            Map<String, Object> m = new com.fasterxml.jackson.databind.ObjectMapper().readValue(json, Map.class);
             String type = String.valueOf(m.get("event"));
             Object tokens = m.get("totalTokens");
             return new StreamEvent(
@@ -102,7 +110,7 @@ public class CursorAgentClient {
                     tokens instanceof Number n ? n.intValue() : null,
                     (String) m.get("error"));
         } catch (Exception e) {
-            log.error("Failed to parse SSE frame from Cursor sidecar: {}", json, e);
+            log.error("Failed to parse SSE frame from Cursor sidecar: {}", m, e);
             return new StreamEvent("error", null, null, null, null, null, null,
                     "Malformed event from sidecar: " + e.getMessage());
         }
