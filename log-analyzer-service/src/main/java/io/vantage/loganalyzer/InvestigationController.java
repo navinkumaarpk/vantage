@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 import reactor.core.publisher.Flux;
@@ -44,6 +45,24 @@ public class InvestigationController {
                         "turnCount", inv.turns.size()
                 ))
                 .toList();
+    }
+
+    /**
+     * Bug found and fixed (2026-07-30): the frontend used to learn an
+     * investigation's ID only from the /api/chat response, so the SSE
+     * activity connection for a brand-new investigation opened AFTER the
+     * whole run already finished -- our replay buffer then dumped every
+     * buffered event at once ("one shot update"), while follow-up turns
+     * (connection already open and idle) showed genuinely live updates.
+     * Confirmed by a real report describing exactly that split behavior.
+     * This endpoint lets the frontend create the investigation and open the
+     * activity connection BEFORE sending the first message at all, so the
+     * first message behaves the same as every follow-up.
+     */
+    @PostMapping("/api/investigations")
+    public Map<String, Object> create() {
+        Investigation inv = store.create("New investigation");
+        return Map.of("id", inv.id, "title", inv.title);
     }
 
     @GetMapping("/api/investigations/{id}")

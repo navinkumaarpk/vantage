@@ -478,8 +478,32 @@
   function send() {
     var text = input.value.trim(); if (!text || busy) return;
     busy = true; sendBtn.disabled = true; addUser(text); input.value = ""; input.style.height = "auto";
-    var pending = addPending(); var isFirstMessage = currentInvestigationId === null;
+    var pending = addPending();
 
+    // Bug found and fixed (2026-07-30): previously the investigation ID and
+    // its activity SSE connection were both derived from the /api/chat
+    // response, so for a brand-new investigation the connection opened only
+    // AFTER the whole run had already finished. The replay buffer then
+    // dumped every event at once (a "one shot update"), while follow-ups --
+    // connection already open and idle -- showed genuinely live events.
+    // Confirmed by a real report describing exactly that split behavior.
+    // ensureInvestigation() creates the record and opens the connection
+    // FIRST, so the first message behaves identically to every follow-up.
+    ensureInvestigation().then(function () { doSendChat(text, pending); });
+  }
+
+  function ensureInvestigation() {
+    if (currentInvestigationId) return Promise.resolve();
+    return fetch("/api/investigations", { method: "POST" })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        currentInvestigationId = d.id;
+        connectActivity(currentInvestigationId);
+        loadInvestigations();
+      });
+  }
+
+  function doSendChat(text, pending) {
     // Client-side timeout — fetch() has no timeout by default, so without
     // this a genuinely broken backend connection (unreachable Ollama host,
     // etc.) leaves the UI waiting forever with no resolution. 3 minutes is
@@ -503,8 +527,6 @@
       .then(function (d) {
         clearTimeout(timeoutId);
         var secs = pending.done(); fillAgent(pending.node, d.answer, d.toolgroupUsed, secs, d.degraded === true, d.modelUsed, d.totalTokens);
-        if (d.investigationId && d.investigationId !== currentInvestigationId) currentInvestigationId = d.investigationId;
-        if (isFirstMessage) connectActivity(currentInvestigationId);
         loadInvestigations();
       })
       .catch(function (err) {

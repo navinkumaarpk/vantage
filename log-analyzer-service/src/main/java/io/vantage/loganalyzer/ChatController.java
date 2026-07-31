@@ -292,6 +292,15 @@ public class ChatController {
     private Investigation resolveInvestigation(ChatRequest request) {
         if (request.investigationId() != null) {
             return investigations.get(request.investigationId())
+                    .map(inv -> {
+                        // Eagerly created via POST /api/investigations with a
+                        // generic placeholder title, before any message existed
+                        // to derive one from. First real message replaces it.
+                        if (inv.turns.isEmpty()) {
+                            inv.title = titleFrom(request.message());
+                        }
+                        return inv;
+                    })
                     .orElseGet(() -> investigations.create(titleFrom(request.message())));
         }
         return investigations.create(titleFrom(request.message()));
