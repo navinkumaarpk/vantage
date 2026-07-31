@@ -176,12 +176,36 @@ def _event_stream(req: ChatRequest):
         result = run.wait()
         usage = getattr(result, "usage", None)
         final_text = (getattr(result, "result", None) or "").strip()
-        yield _sse({
-            "event": "done",
-            "text": final_text,
-            "status": getattr(result, "status", None),
-            "totalTokens": getattr(usage, "total_tokens", None) if usage else None,
-        })
+        status = getattr(result, "status", None)
+
+        # Bug found and fixed (2026-07-30): a run that fails on Cursor's side
+        # (rate limit, quota, internal error) does not necessarily raise a
+        # CursorAgentError -- per the SDK docs, run.wait() can resolve
+        # normally with status in {"error","cancelled","expired"}. This code
+        # previously only read result.result/status and always yielded a
+        # "done" event, so a silently-failed run produced a "done" event with
+        # blank text -- which Java then reported as an unhelpful generic
+        # "empty response" with no indication of what actually went wrong.
+        # Checking status explicitly surfaces the real reason instead.
+        if status != "finished" or not final_text:
+            log.warning(
+                "Cursor run for investigation %s ended without usable output: status=%s, text_len=%d",
+                req.investigationId, status, len(final_text),
+            )
+            yield _sse({
+                "event": "error",
+                "error": f"Cursor run ended with status={status!r} and "
+                         f"{'no' if not final_text else 'some'} text. This usually means a rate limit, "
+                         f"quota, or an internal Cursor-side error rather than a Vantage bug -- check "
+                         f"this sidecar's own logs and the Cursor dashboard's usage page.",
+            })
+        else:
+            yield _sse({
+                "event": "done",
+                "text": final_text,
+                "status": status,
+                "totalTokens": getattr(usage, "total_tokens", None) if usage else None,
+            })
 
     except CursorAgentError as exc:
         log.exception("Cursor run failed for investigation %s", req.investigationId)
