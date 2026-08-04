@@ -118,6 +118,23 @@ public class ChatController {
     @PostMapping("/api/chat")
     public Map<String, Object> chat(@RequestBody ChatRequest request) {
         Investigation investigation = resolveInvestigation(request);
+        // MDC correlates Spring AI's own internal tool-calling log lines
+        // (org.springframework.ai.model.tool.DefaultToolCallingManager,
+        // confirmed via direct verification -- see VantageActivityLogAppender)
+        // back to this specific investigation, so live per-tool-call activity
+        // events work the same way for local models as they already do for
+        // Cursor. Cleared in finally since this thread returns to a pool
+        // afterward and MDC values would otherwise leak into whatever request
+        // reuses it next.
+        org.slf4j.MDC.put("investigationId", investigation.id);
+        try {
+            return handleChat(request, investigation);
+        } finally {
+            org.slf4j.MDC.remove("investigationId");
+        }
+    }
+
+    private Map<String, Object> handleChat(ChatRequest request, Investigation investigation) {
         // Router removed 2026-07-27, for two converging reasons. It failed
         // silently on elliptical follow-ups ("try this timestamp instead"):
         // keyword matching found nothing, no tool was attached, and the model

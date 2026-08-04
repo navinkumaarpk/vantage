@@ -47,18 +47,3 @@ vantage:
       # 8091/8092/8093). All tools now come from one connection.
       vantage:
         url: http://192.168.1.108:8091/mcp
-
-# TEMPORARY diagnostic logging -- added 2026-07-31 specifically to verify
-# whether Spring AI's own internal tool-calling loop logs anything useful at
-# a stable namespace (VISTA's live sidebar taps org.springframework.ai.chat.
-# client.advisor for prompt/response visibility via SimpleLoggerAdvisor, but
-# that only covers request/response boundaries -- this is checking whether
-# individual tool CALLS also log somewhere, which would let local models get
-# real per-tool-call visibility the same way Cursor already does via its own
-# SDK's message stream). Whole org.springframework.ai package at DEBUG is
-# deliberately broad for this one-time diagnostic run -- narrow to whichever
-# specific namespace turns out to matter once we see real output, then
-# remove this block entirely; it is not meant to stay at this verbosity.
-logging:
-  level:
-    org.springframework.ai: DEBUG
