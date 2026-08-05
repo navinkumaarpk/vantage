@@ -160,9 +160,33 @@ def _event_stream(req: ChatRequest):
         for message in run.messages():
             kind = getattr(message, "type", None)
             if kind == "tool_call":
+                raw_name = getattr(message, "name", "?")
+                args = getattr(message, "args", None) or {}
+
+                # Bug found and fixed (2026-08-03): observed real activity feed
+                # entries all showing the generic "mcp" wrapper name instead of
+                # the actual tool (search_logs, get_log_context, ...) -- Cursor
+                # appears to route every MCP-server tool call through a single
+                # dispatcher-named tool, with the real target encoded inside
+                # args. The exact nested shape isn't documented ("Tool call
+                # payload schemas are intentionally not strongly typed"), so
+                # this tries the most plausible keys and logs the raw shape at
+                # INFO the first few times either way -- if the guess is wrong,
+                # the real key name will be visible directly in this log rather
+                # than needing another round of trial and error.
+                resolved_name = raw_name
+                if raw_name == "mcp" and isinstance(args, dict):
+                    resolved_name = (
+                        args.get("tool") or args.get("toolName") or args.get("tool_name")
+                        or args.get("name") or raw_name
+                    )
+                    if resolved_name == raw_name:
+                        log.info("Unresolved 'mcp' tool_call, raw args shape: %s", args)
+
                 yield _sse({
                     "event": "tool_call",
-                    "name": getattr(message, "name", "?"),
+                    "name": resolved_name,
+                    "rawName": raw_name,
                     "status": getattr(message, "status", "?"),
                     "callId": getattr(message, "call_id", None),
                 })

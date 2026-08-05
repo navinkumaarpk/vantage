@@ -1,0 +1,150 @@
+diff --git a/log-analyzer-service/src/main/java/io/vantage/loganalyzer/AsyncWebConfig.java b/log-analyzer-service/src/main/java/io/vantage/loganalyzer/AsyncWebConfig.java
+new file mode 100644
+index 0000000..92dd71a
+--- /dev/null
++++ b/log-analyzer-service/src/main/java/io/vantage/loganalyzer/AsyncWebConfig.java
+@@ -0,0 +1,44 @@
++package io.vantage.loganalyzer;
++
++import org.springframework.context.annotation.Bean;
++import org.springframework.context.annotation.Configuration;
++import org.springframework.core.task.AsyncTaskExecutor;
++import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
++import org.springframework.web.servlet.config.annotation.AsyncSupportConfigurer;
++import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
++
++/**
++ * Dedicated, bounded executor for chat request processing, and the async
++ * request timeout that goes with it.
++ *
++ * <p>Deliberately bounded (not Spring MVC's unbounded default async executor)
++ * so a burst of concurrent investigations can't spawn unlimited threads --
++ * 30 concurrent in-flight chat requests is already generous for this app's
++ * realistic load, and a bound here protects the JVM the same way Tomcat's
++ * own worker pool bound does for ordinary requests.
++ *
++ * <p>Timeout set to 6 minutes -- above the longest client-side abort timeout
++ * currently in use (5 minutes, for the Cursor model in the frontend), so a
++ * genuinely slow-but-working Cursor run isn't cut off by this layer before
++ * the browser's own timeout would have applied anyway.
++ */
++@Configuration
++public class AsyncWebConfig implements WebMvcConfigurer {
++
++    @Bean
++    public AsyncTaskExecutor chatTaskExecutor() {
++        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
++        executor.setCorePoolSize(10);
++        executor.setMaxPoolSize(30);
++        executor.setQueueCapacity(50);
++        executor.setThreadNamePrefix("chat-async-");
++        executor.initialize();
++        return executor;
++    }
++
++    @Override
++    public void configureAsyncSupport(AsyncSupportConfigurer configurer) {
++        configurer.setTaskExecutor(chatTaskExecutor());
++        configurer.setDefaultTimeout(360_000);
++    }
++}
+diff --git a/log-analyzer-service/src/main/java/io/vantage/loganalyzer/ChatController.java b/log-analyzer-service/src/main/java/io/vantage/loganalyzer/ChatController.java
+index c03cb3c..f67094e 100644
+--- a/log-analyzer-service/src/main/java/io/vantage/loganalyzer/ChatController.java
++++ b/log-analyzer-service/src/main/java/io/vantage/loganalyzer/ChatController.java
+@@ -115,23 +115,41 @@ public class ChatController {
+         return List.copyOf(modelOptions);
+     }
+ 
++    // Bug found and fixed (2026-08-03): this endpoint used to return the
++    // answer directly, meaning the Tomcat worker thread handling the HTTP
++    // request stayed blocked for the ENTIRE duration of the call -- for the
++    // Cursor path specifically, up to 5 minutes (.block(Duration.ofMinutes(5))
++    // downstream in the cursor branch). Under concurrent investigations this
++    // ties up request-processing threads unnecessarily. Returning Callable
++    // lets Spring release the request thread back to the pool almost
++    // immediately and run the actual work on a dedicated bounded executor
++    // (see AsyncWebConfig) instead, freeing Tomcat's own thread pool for
++    // other concurrent requests.
++    //
++    // Residual uncertainty, stated plainly: this fixes the one concurrency
++    // bottleneck we know is real and within our control. If the Cursor SDK's
++    // local bridge process (cursor-sdk-bridge) has its own internal
++    // single-flight behavior across agents, this change would not fix that
++    // -- that would be a limitation in the SDK itself, not something
++    // observable or fixable from our code.
+     @PostMapping("/api/chat")
+-    public Map<String, Object> chat(@RequestBody ChatRequest request) {
++    public java.util.concurrent.Callable<Map<String, Object>> chat(@RequestBody ChatRequest request) {
+         Investigation investigation = resolveInvestigation(request);
+-        // MDC correlates Spring AI's own internal tool-calling log lines
+-        // (org.springframework.ai.model.tool.DefaultToolCallingManager,
+-        // confirmed via direct verification -- see VantageActivityLogAppender)
+-        // back to this specific investigation, so live per-tool-call activity
+-        // events work the same way for local models as they already do for
+-        // Cursor. Cleared in finally since this thread returns to a pool
+-        // afterward and MDC values would otherwise leak into whatever request
+-        // reuses it next.
+-        org.slf4j.MDC.put("investigationId", investigation.id);
+-        try {
+-            return handleChat(request, investigation);
+-        } finally {
+-            org.slf4j.MDC.remove("investigationId");
+-        }
++        return () -> {
++            // MDC correlates Spring AI's own internal tool-calling log lines
++            // (org.springframework.ai.model.tool.DefaultToolCallingManager,
++            // confirmed via direct verification -- see
++            // VantageActivityLogAppender) back to this specific investigation.
++            // Must be set INSIDE the Callable, not outside it -- MDC is
++            // thread-local, and this now runs on a different thread than the
++            // one that received the request.
++            org.slf4j.MDC.put("investigationId", investigation.id);
++            try {
++                return handleChat(request, investigation);
++            } finally {
++                org.slf4j.MDC.remove("investigationId");
++            }
++        };
+     }
+ 
+     private Map<String, Object> handleChat(ChatRequest request, Investigation investigation) {
+diff --git a/vantage-cursor-agent/app.py b/vantage-cursor-agent/app.py
+index c902ad0..318f9bd 100644
+--- a/vantage-cursor-agent/app.py
++++ b/vantage-cursor-agent/app.py
+@@ -160,9 +160,33 @@ def _event_stream(req: ChatRequest):
+         for message in run.messages():
+             kind = getattr(message, "type", None)
+             if kind == "tool_call":
++                raw_name = getattr(message, "name", "?")
++                args = getattr(message, "args", None) or {}
++
++                # Bug found and fixed (2026-08-03): observed real activity feed
++                # entries all showing the generic "mcp" wrapper name instead of
++                # the actual tool (search_logs, get_log_context, ...) -- Cursor
++                # appears to route every MCP-server tool call through a single
++                # dispatcher-named tool, with the real target encoded inside
++                # args. The exact nested shape isn't documented ("Tool call
++                # payload schemas are intentionally not strongly typed"), so
++                # this tries the most plausible keys and logs the raw shape at
++                # INFO the first few times either way -- if the guess is wrong,
++                # the real key name will be visible directly in this log rather
++                # than needing another round of trial and error.
++                resolved_name = raw_name
++                if raw_name == "mcp" and isinstance(args, dict):
++                    resolved_name = (
++                        args.get("tool") or args.get("toolName") or args.get("tool_name")
++                        or args.get("name") or raw_name
++                    )
++                    if resolved_name == raw_name:
++                        log.info("Unresolved 'mcp' tool_call, raw args shape: %s", args)
++
+                 yield _sse({
+                     "event": "tool_call",
+-                    "name": getattr(message, "name", "?"),
++                    "name": resolved_name,
++                    "rawName": raw_name,
+                     "status": getattr(message, "status", "?"),
+                     "callId": getattr(message, "call_id", None),
+                 })

@@ -297,7 +297,7 @@
       fileInput = document.getElementById("fileInput"), caseNameInput = document.getElementById("caseNameInput"),
       jiraTicketInput = document.getElementById("jiraTicketInput"), uploadResult = document.getElementById("uploadResult"),
       uploadSubmit = document.getElementById("uploadSubmit"),
-      busy = false, currentInvestigationId = null, eventSource = null, selectedFile = null;
+      busyInvestigations = new Set(), currentInvestigationId = null, eventSource = null, selectedFile = null;
   var EXPECTED = ["vantage"];
   var LABEL = { vantage: "tools", cursor: "cursor agent", local: "local model" };
   var MODEL_LABELS = {};
@@ -372,10 +372,12 @@
       scrollDown();
     });
     connectActivity(id); loadInvestigations();
+    updateSendButtonState();
   }
   function startNewInvestigation() {
     currentInvestigationId = null; thread.innerHTML = ""; thread.appendChild(rebuildWelcome());
     welcome = document.getElementById("welcome"); disconnectActivity(); input.focus(); loadInvestigations();
+    updateSendButtonState();
   }
   function rebuildWelcome() {
     var wrap = el("div", "welcome"); wrap.id = "welcome";
@@ -475,9 +477,30 @@
     }
     node.appendChild(head); node.appendChild(body); scrollDown();
   }
+  // Bug found and fixed (2026-08-03): "busy" used to be one global boolean,
+  // so sendBtn.disabled reflected whether ANY investigation anywhere had a
+  // request in flight -- switching to a different investigation via the
+  // sidebar never re-evaluated it. Confirmed by a real report: send stayed
+  // disabled on investigation 2 and 3 until investigation 1's request
+  // finished, even though nothing about investigation 1 should have blocked
+  // sending to a completely different one. Fetch requests to different
+  // investigations were never actually serialized server-side -- only the
+  // UI's own global flag was wrongly treating them as if they were.
+  // "__new__" is a placeholder key for "currently creating a brand-new
+  // investigation, real ID not known yet" -- migrated to the real ID once
+  // ensureInvestigation() resolves it.
+  function updateSendButtonState() {
+    var key = currentInvestigationId || "__new__";
+    sendBtn.disabled = busyInvestigations.has(key);
+  }
+
   function send() {
-    var text = input.value.trim(); if (!text || busy) return;
-    busy = true; sendBtn.disabled = true; addUser(text); input.value = ""; input.style.height = "auto";
+    var text = input.value.trim(); if (!text) return;
+    var key = currentInvestigationId || "__new__";
+    if (busyInvestigations.has(key)) return;
+    busyInvestigations.add(key);
+    updateSendButtonState();
+    addUser(text); input.value = ""; input.style.height = "auto";
     var pending = addPending();
 
     // Bug found and fixed (2026-07-30): previously the investigation ID and
@@ -489,7 +512,14 @@
     // Confirmed by a real report describing exactly that split behavior.
     // ensureInvestigation() creates the record and opens the connection
     // FIRST, so the first message behaves identically to every follow-up.
-    ensureInvestigation().then(function () { doSendChat(text, pending); });
+    ensureInvestigation().then(function () {
+      if (key === "__new__" && currentInvestigationId) {
+        busyInvestigations.delete("__new__");
+        busyInvestigations.add(currentInvestigationId);
+        updateSendButtonState();
+      }
+      doSendChat(text, pending, currentInvestigationId);
+    });
   }
 
   function ensureInvestigation() {
@@ -503,7 +533,7 @@
       });
   }
 
-  function doSendChat(text, pending) {
+  function doSendChat(text, pending, investigationId) {
     // Client-side timeout — fetch() has no timeout by default, so without
     // this a genuinely broken backend connection (unreachable Ollama host,
     // etc.) leaves the UI waiting forever with no resolution. 3 minutes is
@@ -520,7 +550,7 @@
 
     fetch("/api/chat", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, investigationId: currentInvestigationId, modelKey: modelSelect.value }),
+      body: JSON.stringify({ message: text, investigationId: investigationId, modelKey: modelSelect.value }),
       signal: controller.signal
     })
       .then(function (r) { if (!r.ok) throw new Error("Request failed (" + r.status + ")"); return r.json(); })
@@ -537,7 +567,16 @@
           : "Couldn't reach the analyzer service. It may be restarting — try again in a moment.\n\n" + err.message;
         fillAgent(pending.node, message, null, secs, true);
       })
-      .finally(function () { busy = false; sendBtn.disabled = false; input.focus(); pollStatus(); });
+      .finally(function () {
+        // Only re-enables the button if this investigation is still the one
+        // being viewed -- if the user switched away and back, whatever
+        // updateSendButtonState() ran on that switch already set the
+        // correct state, and this shouldn't clobber it for a DIFFERENT
+        // investigation the user may have since switched to.
+        busyInvestigations.delete(investigationId);
+        if (investigationId === currentInvestigationId) updateSendButtonState();
+        input.focus(); pollStatus();
+      });
   }
   function closeMobilePanels() { sidebar.classList.remove("open"); activityCol.classList.remove("open"); }
   document.getElementById("sidebarToggle").addEventListener("click", function () { sidebar.classList.toggle("open"); activityCol.classList.remove("open"); });
@@ -610,7 +649,7 @@
       })
       .finally(function () { uploadSubmit.disabled = false; });
   });
-  pollStatus(); setInterval(pollStatus, 30000); loadInvestigations(); setInterval(loadInvestigations, 15000); loadModels(); input.focus();
+  pollStatus(); setInterval(pollStatus, 30000); loadInvestigations(); setInterval(loadInvestigations, 15000); loadModels(); updateSendButtonState(); input.focus();
 })();
 </script>
 </body>

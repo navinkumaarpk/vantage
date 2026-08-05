@@ -115,23 +115,41 @@ public class ChatController {
         return List.copyOf(modelOptions);
     }
 
+    // Bug found and fixed (2026-08-03): this endpoint used to return the
+    // answer directly, meaning the Tomcat worker thread handling the HTTP
+    // request stayed blocked for the ENTIRE duration of the call -- for the
+    // Cursor path specifically, up to 5 minutes (.block(Duration.ofMinutes(5))
+    // downstream in the cursor branch). Under concurrent investigations this
+    // ties up request-processing threads unnecessarily. Returning Callable
+    // lets Spring release the request thread back to the pool almost
+    // immediately and run the actual work on a dedicated bounded executor
+    // (see AsyncWebConfig) instead, freeing Tomcat's own thread pool for
+    // other concurrent requests.
+    //
+    // Residual uncertainty, stated plainly: this fixes the one concurrency
+    // bottleneck we know is real and within our control. If the Cursor SDK's
+    // local bridge process (cursor-sdk-bridge) has its own internal
+    // single-flight behavior across agents, this change would not fix that
+    // -- that would be a limitation in the SDK itself, not something
+    // observable or fixable from our code.
     @PostMapping("/api/chat")
-    public Map<String, Object> chat(@RequestBody ChatRequest request) {
+    public java.util.concurrent.Callable<Map<String, Object>> chat(@RequestBody ChatRequest request) {
         Investigation investigation = resolveInvestigation(request);
-        // MDC correlates Spring AI's own internal tool-calling log lines
-        // (org.springframework.ai.model.tool.DefaultToolCallingManager,
-        // confirmed via direct verification -- see VantageActivityLogAppender)
-        // back to this specific investigation, so live per-tool-call activity
-        // events work the same way for local models as they already do for
-        // Cursor. Cleared in finally since this thread returns to a pool
-        // afterward and MDC values would otherwise leak into whatever request
-        // reuses it next.
-        org.slf4j.MDC.put("investigationId", investigation.id);
-        try {
-            return handleChat(request, investigation);
-        } finally {
-            org.slf4j.MDC.remove("investigationId");
-        }
+        return () -> {
+            // MDC correlates Spring AI's own internal tool-calling log lines
+            // (org.springframework.ai.model.tool.DefaultToolCallingManager,
+            // confirmed via direct verification -- see
+            // VantageActivityLogAppender) back to this specific investigation.
+            // Must be set INSIDE the Callable, not outside it -- MDC is
+            // thread-local, and this now runs on a different thread than the
+            // one that received the request.
+            org.slf4j.MDC.put("investigationId", investigation.id);
+            try {
+                return handleChat(request, investigation);
+            } finally {
+                org.slf4j.MDC.remove("investigationId");
+            }
+        };
     }
 
     private Map<String, Object> handleChat(ChatRequest request, Investigation investigation) {
