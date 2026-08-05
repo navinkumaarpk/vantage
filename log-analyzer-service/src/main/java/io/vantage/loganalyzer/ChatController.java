@@ -193,6 +193,14 @@ public class ChatController {
                             if ("tool_call".equals(evt.type())) {
                                 investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id,
                                         "cursor", "tool_call", evt.toolName() + " (" + evt.toolStatus() + ")"));
+                            } else if ("thinking".equals(evt.type()) && evt.textDelta() != null && !evt.textDelta().isBlank()) {
+                                // Real reasoning text from Cursor's SDKThinkingMessage
+                                // stream -- confirmed field, not fabricated. Truncated
+                                // since thinking blocks can run long and this is meant
+                                // as a live glimpse, not a full transcript.
+                                String text = evt.textDelta();
+                                investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id,
+                                        "cursor", "reasoning", text.length() > 200 ? text.substring(0, 200) + "…" : text));
                             }
                         })
                         .collectList()

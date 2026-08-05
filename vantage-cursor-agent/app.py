@@ -196,6 +196,14 @@ def _event_stream(req: ChatRequest):
                         text = getattr(block, "text", "") or ""
                         if text:
                             yield _sse({"event": "text_delta", "text": text})
+            elif kind == "thinking":
+                # SDKThinkingMessage: confirmed fields text, thinking_duration_ms
+                # (per the SDK reference docs, not guessed). This is real
+                # reasoning content, not fabricated -- the whole point of
+                # wiring this at all.
+                text = getattr(message, "text", "") or ""
+                if text:
+                    yield _sse({"event": "thinking", "text": text})
 
         result = run.wait()
         usage = getattr(result, "usage", None)

@@ -9,9 +9,15 @@
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #14171c; --panel: #1b1f27; --raised: #21262f; --line: #2c323d;
-    --text: #e7e5e0; --dim: #8b93a1; --faint: #5a6272;
-    --brass: #c9922f; --brass-dim: #8a6a2c; --amber: #e8a33d; --alert: #e2542d; --ok: #5fad8c;
+    /* Evolved from the original graphite/brass identity, not replaced.
+       Brass stays exactly as the idle/identity accent it always was.
+       --live is new and means one thing only: "something is happening
+       right now" -- it never appears on anything static. */
+    --bg: #0f1218; --panel: #171b24; --raised: #1f2530; --line: #2c3340;
+    --text: #eef0f4; --dim: #93a0b8; --faint: #5c6780;
+    --brass: #c9922f; --brass-dim: #8a6a2c;
+    --live: #2dd4bf; --live-dim: #1a8577;
+    --amber: #ffb454; --alert: #ff5c5c; --ok: #34d399;
     --mono: 'IBM Plex Mono', ui-monospace, monospace; --sans: 'IBM Plex Sans', system-ui, sans-serif;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -139,15 +145,32 @@
   .agent-body th { background: var(--panel); color: var(--brass); font-family: var(--mono); font-size: 11px; letter-spacing: 0.03em; font-weight: 500; }
   .agent-body tr:nth-child(even) td { background: rgba(255,255,255,0.015); }
   .msg-agent.degraded .agent-body { color: var(--amber); }
-  .pending { display: flex; align-items: center; gap: 16px; padding: 4px 0; }
-  .gauge { font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 24px; font-weight: 500; color: var(--brass); letter-spacing: 0.02em; min-width: 76px; }
-  .gauge s { font-size: 14px; color: var(--brass-dim); text-decoration: none; }
-  .pending-meta { display: flex; flex-direction: column; gap: 3px; }
-  .pending-meta strong { font-family: var(--mono); font-size: 11px; font-weight: 500; letter-spacing: 0.06em; color: var(--text); }
-  .pending-meta em { font-style: normal; font-size: 11px; color: var(--faint); }
-  .ticks { display: flex; gap: 3px; margin-top: 7px; }
-  .ticks i { width: 3px; height: 11px; background: var(--line); border-radius: 1px; }
-  .ticks i.on { background: var(--brass-dim); }
+  /* ===== Live Signal — replaces the numeric elapsed-seconds gauge. =====
+     Idle panel language stays brass; this only lights up teal while a
+     request is genuinely in flight, and goes dark the instant it resolves.
+     No fabricated progress steps -- the waveform means "something real is
+     happening," the text beneath it is only ever real content (Cursor's
+     actual thinking stream, or local models' actual tool calls), never
+     placeholder text standing in for data we don't have. */
+  .signal-card {
+    background: linear-gradient(180deg, var(--panel), var(--bg));
+    border: 1px solid var(--live-dim); border-radius: 10px; padding: 14px 16px; margin-bottom: 4px;
+    box-shadow: 0 0 0 1px rgba(45,212,191,0.05), 0 6px 24px rgba(45,212,191,0.06);
+  }
+  .signal-head { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .signal-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--live); box-shadow: 0 0 8px var(--live); animation: sigPulse 1.6s ease-in-out infinite; }
+  @keyframes sigPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.5; transform: scale(0.7); } }
+  .signal-label { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; color: var(--live); text-transform: uppercase; }
+  .signal-wave { height: 28px; margin-bottom: 8px; }
+  .signal-wave svg { width: 100%; height: 100%; display: block; }
+  .signal-wave path { fill: none; stroke: var(--live); stroke-width: 1.5; filter: drop-shadow(0 0 3px rgba(45,212,191,0.55)); }
+  .signal-text {
+    font-family: var(--mono); font-size: 12px; line-height: 1.6; color: var(--dim); font-style: italic;
+    border-left: 2px solid var(--live-dim); padding-left: 10px; min-height: 17px;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .signal-text .blink { display: inline-block; width: 5px; height: 11px; background: var(--live); margin-left: 2px; animation: sigBlink 1s step-end infinite; vertical-align: -1px; }
+  @keyframes sigBlink { 50% { opacity: 0; } }
   footer { flex-shrink: 0; border-top: 1px solid var(--line); background: var(--bg); }
   .composer { max-width: 720px; margin: 0 auto; padding: 14px 24px 18px; }
   .field { display: flex; align-items: flex-end; gap: 10px; background: var(--raised); border: 1px solid var(--line); border-radius: 12px; padding: 8px 8px 8px 16px; transition: border-color 0.15s; }
@@ -160,20 +183,22 @@
   .hint { margin-top: 8px; font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
   .activity-col { border-left: 1px solid var(--line); background: var(--panel); display: flex; flex-direction: column; min-height: 0; }
   .activity-head { padding: 14px 16px 10px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; color: var(--faint); text-transform: uppercase; display: flex; align-items: center; justify-content: space-between; }
-  .live-pulse { display: flex; align-items: center; gap: 6px; color: var(--ok); font-size: 10px; }
-  .live-pulse::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); animation: pulse 1.4s infinite ease-in-out; }
-  .live-pulse.off::before { background: var(--faint); animation: none; }
+  .live-pulse { display: flex; align-items: center; gap: 6px; color: var(--live); font-size: 10px; }
+  .live-pulse::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--live); box-shadow: 0 0 6px var(--live); animation: pulse 1.4s infinite ease-in-out; }
+  .live-pulse.off::before { background: var(--faint); box-shadow: none; animation: none; }
   .live-pulse.off { color: var(--faint); }
   @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
   .activity-feed { flex: 1; overflow-y: auto; padding: 0 14px 14px; font-family: var(--mono); font-size: 11.5px; }
-  .a-row { display: flex; gap: 9px; padding: 7px 0; border-bottom: 1px dashed var(--line); }
+  .a-row { display: flex; gap: 9px; padding: 7px 0; border-bottom: 1px dashed var(--line); opacity: 0; animation: rowIn 0.3s ease forwards; }
+  @keyframes rowIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: translateY(0); } }
   .a-row:last-child { border-bottom: none; }
   .a-icon { flex-shrink: 0; width: 12px; padding-top: 2px; }
   .a-icon.ok { color: var(--ok); }
   .a-icon.fail { color: var(--alert); }
-  .a-icon.run { color: var(--amber); }
+  .a-icon.run { color: var(--live); }
   .a-text { color: var(--dim); line-height: 1.5; }
   .a-text b { color: var(--text); font-weight: 500; }
+  .a-row.reasoning { font-style: italic; color: var(--faint); font-size: 11px; border-bottom-style: dotted; }
   .a-empty { padding: 16px 2px; font-size: 11.5px; color: var(--faint); line-height: 1.6; }
   ::-webkit-scrollbar { width: 9px; }
   ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 5px; }
@@ -423,6 +448,24 @@
   }
   function renderActivityEvent(evt) {
     if (activityFeed.querySelector(".a-empty")) activityFeed.innerHTML = "";
+
+    // Live signal text: only reasoning and tool_call carry content worth
+    // showing inline (routing/llm_call/agent_run are bookkeeping, not
+    // narrative). Real content only -- Cursor's actual thinking text for
+    // "reasoning", the real tool name for "tool_call".
+    if (currentSignal && (evt.toolName === "reasoning" || evt.toolName === "tool_call")) {
+      var line = (evt.toolName === "reasoning") ? (evt.summary || "") : "→ " + (evt.summary || "");
+      currentSignal.textContent = line;
+      currentSignal.appendChild(el("span", "blink"));
+    }
+
+    if (evt.toolName === "reasoning") {
+      var rrow = el("div", "a-row reasoning");
+      rrow.textContent = (evt.summary || "").slice(0, 160);
+      activityFeed.appendChild(rrow); activityFeed.scrollTop = activityFeed.scrollHeight;
+      return;
+    }
+
     var row = el("div", "a-row");
     var icon = el("div", "a-icon " + (evt.status === "SUCCEEDED" ? "ok" : evt.status === "FAILED" ? "fail" : "run"));
     icon.textContent = evt.status === "SUCCEEDED" ? "✓" : evt.status === "FAILED" ? "✗" : "●";
@@ -432,20 +475,37 @@
     row.appendChild(icon); row.appendChild(text); activityFeed.appendChild(row); activityFeed.scrollTop = activityFeed.scrollHeight;
   }
   function addUser(text) { if (welcome) { welcome.remove(); welcome = null; } thread.appendChild(el("div", "msg-user", text)); scrollDown(); }
+  var currentSignal = null; // set while addPending's card is live, cleared on .done()
+
   function addPending() {
     var wrap = el("div", "msg-agent"); var head = el("div", "agent-head"); head.appendChild(el("div", "agent-label", "AGENT")); wrap.appendChild(head);
-    var row = el("div", "pending"); var gauge = el("div", "gauge"); var meta = el("div", "pending-meta");
-    meta.appendChild(el("strong", null, "WORKING")); meta.appendChild(el("em", null, "Local model — answers usually land in 15–50s"));
-    var ticks = el("div", "ticks"); for (var i = 0; i < 24; i++) ticks.appendChild(el("i")); meta.appendChild(ticks);
-    row.appendChild(gauge); row.appendChild(meta); wrap.appendChild(row); thread.appendChild(wrap);
+
+    var card = el("div", "signal-card");
+    var sigHead = el("div", "signal-head");
+    sigHead.appendChild(el("div", "signal-dot"));
+    sigHead.appendChild(el("div", "signal-label", "live signal"));
+    card.appendChild(sigHead);
+
+    var waveWrap = el("div", "signal-wave");
+    waveWrap.innerHTML = '<svg viewBox="0 0 600 28" preserveAspectRatio="none"><path d="M0,14 L20,14 L28,3 L36,25 L44,8 L52,20 L60,14 L100,14 L108,5 L116,23 L124,10 L132,18 L140,14 L200,14 L208,2 L216,26 L224,7 L232,21 L240,14 L300,14 L308,6 L316,22 L324,11 L332,17 L340,14 L420,14 L428,4 L436,24 L444,9 L452,19 L460,14 L560,14 L568,3 L576,25 L584,8 L592,20 L600,14"/></svg>';
+    card.appendChild(waveWrap);
+
+    // Only ever real content, never fabricated: Cursor's actual thinking
+    // stream when available, real tool names as they're actually called
+    // (both local and Cursor), or this honest placeholder if nothing has
+    // arrived yet.
+    var textEl = el("div", "signal-text");
+    textEl.appendChild(document.createTextNode("Working…"));
+    textEl.appendChild(el("span", "blink"));
+    card.appendChild(textEl);
+
+    wrap.appendChild(card); thread.appendChild(wrap); scrollDown();
     var start = Date.now();
-    function paint() {
-      var s = (Date.now() - start) / 1000; gauge.innerHTML = s.toFixed(1) + "<s>s</s>";
-      var lit = Math.min(24, Math.floor(s / 2.5)); var bars = ticks.children;
-      for (var i = 0; i < bars.length; i++) bars[i].className = i < lit ? "on" : "";
-    }
-    paint(); var timer = setInterval(paint, 100); scrollDown();
-    return { done: function () { clearInterval(timer); return ((Date.now() - start) / 1000).toFixed(1); }, node: wrap };
+    currentSignal = textEl;
+    return {
+      done: function () { currentSignal = null; return ((Date.now() - start) / 1000).toFixed(1); },
+      node: wrap
+    };
   }
   function fillAgent(node, text, toolgroup, seconds, degraded, modelKey, tokens) {
     node.innerHTML = ""; if (degraded) node.classList.add("degraded");
