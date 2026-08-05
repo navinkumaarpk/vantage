@@ -159,6 +159,18 @@ def _event_stream(req: ChatRequest):
 
         for message in run.messages():
             kind = getattr(message, "type", None)
+
+            # TEMPORARY diagnostic (2026-08-03): added specifically to verify
+            # whether Composer 2.5 actually emits "thinking" messages at all,
+            # after wiring the handler for it produced no visible reasoning
+            # text in real testing. Rather than guess at ANOTHER fix, log
+            # every kind actually observed -- this will show definitively
+            # whether "thinking" never appears (model doesn't stream visible
+            # reasoning), appears under a different name than expected, or
+            # appears but with an empty/differently-shaped text field. Remove
+            # once this is confirmed either way.
+            log.info("Message kind observed: %s (investigation=%s)", kind, req.investigationId)
+
             if kind == "tool_call":
                 raw_name = getattr(message, "name", "?")
                 args = getattr(message, "args", None) or {}
@@ -202,6 +214,7 @@ def _event_stream(req: ChatRequest):
                 # reasoning content, not fabricated -- the whole point of
                 # wiring this at all.
                 text = getattr(message, "text", "") or ""
+                log.info("thinking message observed, text_len=%d, raw=%r", len(text), message)
                 if text:
                     yield _sse({"event": "thinking", "text": text})
 
