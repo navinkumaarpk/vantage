@@ -449,20 +449,43 @@
   function renderActivityEvent(evt) {
     if (activityFeed.querySelector(".a-empty")) activityFeed.innerHTML = "";
 
-    // Live signal text: only reasoning and tool_call carry content worth
-    // showing inline (routing/llm_call/agent_run are bookkeeping, not
-    // narrative). Real content only -- Cursor's actual thinking text for
-    // "reasoning", the real tool name for "tool_call".
-    if (currentSignal && (evt.toolName === "reasoning" || evt.toolName === "tool_call")) {
-      var line = (evt.toolName === "reasoning") ? (evt.summary || "") : "→ " + (evt.summary || "");
-      currentSignal.textContent = line;
+    // Bug found and fixed (2026-08-05): confirmed via real logging that
+    // "thinking" events WERE arriving correctly with real content all the
+    // way through Python and Java -- the break was here. Real thinking
+    // streams as dozens of small word-fragments within milliseconds (e.g.
+    // "Fetching all log" then " entries" then " for R-OLT" ...), and this
+    // used to REPLACE the displayed text on every single fragment, so each
+    // one was destroyed by the next before a human could read it -- visually
+    // indistinguishable from nothing showing at all, even though every
+    // fragment really was arriving and really was being published.
+    // Accumulating into a growing block instead of replacing is the fix.
+    if (currentSignal && evt.toolName === "reasoning") {
+      currentSignal.dataset.acc = (currentSignal.dataset.acc || "") + (evt.summary || "");
+      // Cap displayed length so this doesn't grow into an unreadable wall of
+      // text over a long investigation -- keep the most recent context.
+      var acc = currentSignal.dataset.acc;
+      if (acc.length > 600) { acc = acc.slice(acc.length - 600); currentSignal.dataset.acc = acc; }
+      currentSignal.textContent = acc;
+      currentSignal.appendChild(el("span", "blink"));
+    } else if (currentSignal && evt.toolName === "tool_call") {
+      currentSignal.dataset.acc = ""; // fresh accumulator once actual tool use starts
+      currentSignal.textContent = "→ " + (evt.summary || "");
       currentSignal.appendChild(el("span", "blink"));
     }
 
     if (evt.toolName === "reasoning") {
-      var rrow = el("div", "a-row reasoning");
-      rrow.textContent = (evt.summary || "").slice(0, 160);
-      activityFeed.appendChild(rrow); activityFeed.scrollTop = activityFeed.scrollHeight;
+      // Same accumulation problem applied to the sidebar: append consecutive
+      // reasoning fragments onto the last reasoning row instead of flooding
+      // the feed with dozens of near-unreadable one-line entries.
+      var last = activityFeed.lastElementChild;
+      if (last && last.classList.contains("reasoning")) {
+        last.textContent = (last.textContent + (evt.summary || "")).slice(-220);
+      } else {
+        var rrow = el("div", "a-row reasoning");
+        rrow.textContent = (evt.summary || "").slice(0, 220);
+        activityFeed.appendChild(rrow);
+      }
+      activityFeed.scrollTop = activityFeed.scrollHeight;
       return;
     }
 

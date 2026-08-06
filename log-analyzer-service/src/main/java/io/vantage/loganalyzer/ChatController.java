@@ -190,6 +190,16 @@ public class ChatController {
             try {
                 events = cursorAgent.chatStream(request.message(), investigation.id)
                         .doOnNext(evt -> {
+                            // TEMPORARY diagnostic (2026-08-05): Python's own
+                            // logs confirmed real "thinking" events ARE being
+                            // yielded with real text, but the waveform still
+                            // only showed tool calls in real testing. Logging
+                            // every event type Java's Flux actually receives
+                            // narrows down whether the break is here (events
+                            // never arrive / arrive malformed) or downstream
+                            // in the frontend rendering. Remove once confirmed.
+                            log.info("Cursor stream event received: type={} textDelta={}",
+                                    evt.type(), evt.textDelta());
                             if ("tool_call".equals(evt.type())) {
                                 investigation.activity.publish(AgentActivityEvent.succeeded(investigation.id,
                                         "cursor", "tool_call", evt.toolName() + " (" + evt.toolStatus() + ")"));
